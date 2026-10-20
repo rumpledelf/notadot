@@ -11,6 +11,7 @@ final class Codex {
     private var buffer = Data()
     private var nextID = 0
     private var pending: [Int: (Result<[String: Any], Error>) -> Void] = [:]
+    private var methods: [Int: String] = [:]
     var running: Bool { process?.isRunning == true }
 
     func start(path: String, cwd: String, ready: @escaping (Result<[String: Any], Error>) -> Void) throws {
@@ -20,7 +21,7 @@ final class Codex {
         p.arguments = ["app-server", "--listen", "stdio://"]
         p.currentDirectoryURL = URL(fileURLWithPath: cwd)
         var env = ProcessInfo.processInfo.environment
-        env["PATH"] = [FileManager.default.homeDirectoryForCurrentUser.path + "/.local/bin", "/opt/local/bin", "/usr/local/bin", "/usr/bin", "/bin", env["PATH"] ?? ""].joined(separator: ":")
+        env["PATH"] = [FileManager.default.homeDirectoryForCurrentUser.path + "/.local/bin", "/opt/homebrew/bin", "/opt/local/bin", "/usr/local/bin", "/usr/bin", "/bin", env["PATH"] ?? ""].joined(separator: ":")
         p.environment = env; p.standardInput = stdin; p.standardOutput = stdout; p.standardError = stderr
         input = stdin.fileHandleForWriting; output = stdout.fileHandleForReading; errors = stderr.fileHandleForReading
         output?.readabilityHandler = { [weak self] handle in
@@ -43,7 +44,7 @@ final class Codex {
     }
     func call(_ method: String, _ params: [String: Any], completion: @escaping (Result<[String: Any], Error>) -> Void) {
         guard running else { completion(.failure(AppError.message("Codex is disconnected."))); return }
-        nextID += 1; pending[nextID] = completion
+        nextID += 1; pending[nextID] = completion; methods[nextID] = method
         send(["id": nextID, "method": method, "params": params])
     }
     func reply(_ id: Any, _ result: [String: Any]) { send(["id": id, "result": result]) }
@@ -64,7 +65,9 @@ final class Codex {
                 let params = object["params"] as? [String: Any] ?? [:]
                 if let id = object["id"] { request?(id, method, params) } else { event?(method, params) }
             } else if let id = object["id"] as? Int, let completion = pending.removeValue(forKey: id) {
-                if let error = object["error"] as? [String: Any] { completion(.failure(AppError.message(error["message"] as? String ?? "Codex request failed."))) }
+                let method = methods.removeValue(forKey: id) ?? "request"
+                // Name the method so a protocol change in a Codex update is recognisable as one.
+                if let error = object["error"] as? [String: Any] { completion(.failure(AppError.message("Codex \(method): " + (error["message"] as? String ?? "request failed.")))) }
                 else { completion(.success(object["result"] as? [String: Any] ?? [:])) }
             }
         }
@@ -72,7 +75,7 @@ final class Codex {
     private func closed(_ message: String) {
         output?.readabilityHandler = nil; errors?.readabilityHandler = nil
         input = nil; buffer = Data()
-        let callbacks = pending.values; pending.removeAll()
+        let callbacks = pending.values; pending.removeAll(); methods.removeAll()
         callbacks.forEach { $0(.failure(AppError.message(message))) }
         disconnected?(message)
     }

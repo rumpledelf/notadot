@@ -5,19 +5,53 @@ struct Project: Codable {
     var name: String
     var path: String
     var port: Int
-    var start: String
+    var start: String // Empty: a link-only project that Notadot never starts or stops.
     var stop: String = ""
+    var url: String = "" // Empty: http://localhost:<port>/.
+    init(name: String, path: String, port: Int, start: String, stop: String = "", url: String = "") {
+        self.name = name; self.path = path; self.port = port; self.start = start; self.stop = stop; self.url = url
+    }
+    // Decoded field by field so settings written by older builds still load.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString
+        name = try c.decode(String.self, forKey: .name)
+        path = try c.decode(String.self, forKey: .path)
+        port = try c.decodeIfPresent(Int.self, forKey: .port) ?? 0
+        start = try c.decodeIfPresent(String.self, forKey: .start) ?? ""
+        stop = try c.decodeIfPresent(String.self, forKey: .stop) ?? ""
+        url = try c.decodeIfPresent(String.self, forKey: .url) ?? ""
+    }
+    var managed: Bool { !start.trimmingCharacters(in: .whitespaces).isEmpty }
+    static func defaultURL(_ port: Int) -> String { port > 0 ? "http://localhost:\(port)/" : "" }
+    var openURL: URL? {
+        let text = url.trimmingCharacters(in: .whitespaces)
+        if !text.isEmpty { return URL(string: text.contains("://") ? text : "http://" + text) }
+        return port > 0 ? URL(string: "http://localhost:\(port)/") : nil
+    }
 }
 struct Settings: Codable {
     var title = "Notadot"
-    var root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Sites").path
     var notes = ""
     var editor = "" // macOS application name; empty uses the default Markdown application.
-    var codex = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/codex").path
+    var codex = "" // Empty finds codex at launch, so updates and reinstalls that move it need no setting change.
     var model = ""
     var screenEnabled = false
     var clipboardEnabled = false
     var projects: [Project] = []
+    init() {}
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = Settings()
+        title = try c.decodeIfPresent(String.self, forKey: .title) ?? d.title
+        notes = try c.decodeIfPresent(String.self, forKey: .notes) ?? d.notes
+        editor = try c.decodeIfPresent(String.self, forKey: .editor) ?? d.editor
+        codex = try c.decodeIfPresent(String.self, forKey: .codex) ?? d.codex
+        model = try c.decodeIfPresent(String.self, forKey: .model) ?? d.model
+        screenEnabled = try c.decodeIfPresent(Bool.self, forKey: .screenEnabled) ?? d.screenEnabled
+        clipboardEnabled = try c.decodeIfPresent(Bool.self, forKey: .clipboardEnabled) ?? d.clipboardEnabled
+        projects = try c.decodeIfPresent([Project].self, forKey: .projects) ?? d.projects
+    }
 }
 struct Message: Codable {
     var role: String
@@ -43,6 +77,8 @@ final class Store {
         let sessionURL = self.directory.appendingPathComponent("session.json")
         settings = FileManager.default.fileExists(atPath: settingsURL.path) ? try JSONDecoder().decode(Settings.self, from: Data(contentsOf: settingsURL)) : Settings()
         session = FileManager.default.fileExists(atPath: sessionURL.path) ? try JSONDecoder().decode(Session.self, from: Data(contentsOf: sessionURL)) : Session()
+        // Earlier builds saved this default explicitly; treat it as "find codex" so it follows reinstalls.
+        if settings.codex == FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/codex").path { settings.codex = "" }
         if settings.notes.isEmpty { settings.notes = self.directory.appendingPathComponent("notes.md").path }
         if !FileManager.default.fileExists(atPath: settings.notes) {
             try "# Notadot notes\n\nPersistent preferences, decisions, and loose ends live here.\n".write(toFile: settings.notes, atomically: true, encoding: .utf8)
@@ -56,15 +92,36 @@ final class Store {
         try encoder.encode(value).write(to: directory.appendingPathComponent(filename), options: .atomic)
     }
     func validate(_ s: Settings) throws {
-        guard !s.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw AppError.message("Give the window a name.") }
-        var isDir: ObjCBool = false
-        guard s.root.hasPrefix("/"), FileManager.default.fileExists(atPath: s.root, isDirectory: &isDir), isDir.boolValue else { throw AppError.message("Project root must be an existing absolute folder path.") }
+        guard !s.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw AppError.message("Give the assistant a name.") }
         guard s.notes.hasPrefix("/"), FileManager.default.fileExists(atPath: URL(fileURLWithPath: s.notes).deletingLastPathComponent().path) else { throw AppError.message("Notes need an absolute path in an existing folder.") }
-        guard FileManager.default.isExecutableFile(atPath: s.codex) else { throw AppError.message("Codex executable was not found at that path.") }
+        guard Self.codexPath(s.codex) != nil else { throw AppError.message(s.codex.isEmpty ? "Codex was not found. Install it, or choose it." : "Codex executable was not found at that path.") }
+        try Self.validate(projects: s.projects)
+    }
+    static func validate(projects: [Project]) throws {
         var ports = Set<Int>(); var names = Set<String>(); var ids = Set<String>()
-        for p in s.projects {
-            guard !p.name.isEmpty, !p.start.isEmpty, p.path.hasPrefix("/"), FileManager.default.fileExists(atPath: p.path), (1024...65535).contains(p.port) else { throw AppError.message("Each project needs a name, existing absolute path, start command, and port from 1024 to 65535.") }
-            guard ports.insert(p.port).inserted, names.insert(p.name.lowercased()).inserted, ids.insert(p.id).inserted else { throw AppError.message("Project names, IDs, and ports must be unique.") }
+        for p in projects {
+            var isDir: ObjCBool = false
+            guard !p.name.trimmingCharacters(in: .whitespaces).isEmpty else { throw AppError.message("Give the project a name.") }
+            guard p.path.hasPrefix("/"), FileManager.default.fileExists(atPath: p.path, isDirectory: &isDir), isDir.boolValue else { throw AppError.message("\(p.name): the folder doesn't exist.") }
+            guard names.insert(p.name.lowercased()).inserted, ids.insert(p.id).inserted else { throw AppError.message("There's already a project called \(p.name).") }
+            guard p.port == 0 || (1024...65535).contains(p.port) else { throw AppError.message("\(p.name): ports run from 1024 to 65535.") }
+            if p.managed {
+                // Only projects Notadot starts own a port; link-only projects may share one, like fern's tools.
+                guard p.port > 0 else { throw AppError.message("\(p.name): a project with a Runs command needs a port.") }
+                guard p.start.contains("{port}") else { throw AppError.message("\(p.name): put {port} in the Runs command where the port goes.") }
+                guard ports.insert(p.port).inserted else { throw AppError.message("\(p.name): another project already runs on port \(p.port).") }
+            }
+            if !p.url.trimmingCharacters(in: .whitespaces).isEmpty, p.openURL == nil { throw AppError.message("\(p.name): that Open address isn't a valid URL.") }
         }
+    }
+    /// A configured path wins. Otherwise search the usual install locations, then the login shell's PATH,
+    /// because an app opened from Finder does not inherit the terminal's PATH.
+    static func codexPath(_ configured: String) -> String? {
+        let fm = FileManager.default
+        if !configured.isEmpty { return fm.isExecutableFile(atPath: configured) ? configured : nil }
+        let home = fm.homeDirectoryForCurrentUser.path
+        for dir in ["\(home)/.local/bin", "/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"] where fm.isExecutableFile(atPath: dir + "/codex") { return dir + "/codex" }
+        let found = RuntimeManager.command("/bin/bash", ["-lc", "command -v codex"]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return found.hasPrefix("/") && fm.isExecutableFile(atPath: found) ? found : nil
     }
 }

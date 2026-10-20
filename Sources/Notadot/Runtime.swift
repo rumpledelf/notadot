@@ -31,29 +31,42 @@ final class RuntimeManager {
         }
         return false
     }
-    func status(_ project: Project) -> String {
+    enum State { case running, starting, stopped, responding, unknown }
+    struct Status { let state: State; let text: String }
+    /// Green and red are for runtimes Notadot owns. Blue means something answers that Notadot didn't start;
+    /// grey means nothing answered. Link-only projects rely on the URL probe, since they may live elsewhere.
+    func status(_ project: Project, probe: URLProbe? = nil) -> Status {
         if let run = running[project.id] {
-            if !run.process.isRunning { running.removeValue(forKey: project.id); failures[project.id] = "Exited (\(run.process.terminationStatus)); see log" }
+            if !run.process.isRunning { running.removeValue(forKey: project.id); failures[project.id] = "Exited: " + (lastLogLine(project.id).map { $0.replacingOccurrences(of: "/bin/bash: line 0: ", with: "") } ?? "status \(run.process.terminationStatus)") }
             else {
                 let listeners = Self.command("/usr/sbin/lsof", ["-nP", "-a", "-g", String(run.process.processIdentifier), "-iTCP", "-sTCP:LISTEN", "-Fn"])
                 let ports = listeners.split(separator: "\n").filter { $0.hasPrefix("n") }.compactMap { Int($0.split(separator: ":").last ?? "") }
                 if ports.contains(where: { $0 != run.port }) {
-                    terminate(project.id); failures[project.id] = "Stopped: runtime opened an unconfigured port"; return failures[project.id]!
+                    terminate(project.id); failures[project.id] = "Stopped: it opened a different port"; return Status(state: .stopped, text: failures[project.id]!)
                 }
-                if ports.contains(run.port) { return "Running · :\(run.port)" }
+                if ports.contains(run.port) { return Status(state: .running, text: "Running · :\(run.port)") }
                 if Date().timeIntervalSince(run.started) > 30 {
-                    terminate(project.id); failures[project.id] = "Failed: port \(run.port) did not open within 30 seconds"; return failures[project.id]!
+                    terminate(project.id); failures[project.id] = "Failed: :\(run.port) didn't open in 30s"; return Status(state: .stopped, text: failures[project.id]!)
                 }
-                return "Starting · :\(run.port)"
+                return Status(state: .starting, text: "Starting · :\(run.port)")
             }
         }
-        if let error = failures[project.id] { return error }
-        return Self.portOccupied(project.port) ? "Port \(project.port) occupied · unmanaged" : "Stopped"
+        if project.managed {
+            if project.port > 0, Self.portOccupied(project.port) { return Status(state: .responding, text: "Responding · not started here") }
+            return Status(state: .stopped, text: failures[project.id] ?? "Stopped · :\(project.port)")
+        }
+        switch project.openURL.flatMap({ probe?.result($0) }) {
+        case .some(true): return Status(state: .responding, text: "Responding · not started here")
+        case .some(false): return Status(state: .unknown, text: "Not responding")
+        case .none: return Status(state: .unknown, text: project.openURL == nil ? "No address" : "Checking…")
+        }
     }
+    var ownedGroups: Set<Int32> { Set(running.values.filter { $0.process.isRunning }.map { $0.process.processIdentifier }) }
     func start(_ project: Project) throws {
         guard running[project.id]?.process.isRunning != true else { return }
         guard !Self.portOccupied(project.port) else { throw AppError.message("Port \(project.port) is occupied. Nothing was stopped and no alternative port was chosen.") }
-        guard project.start.contains("{port}") else { throw AppError.message("The start command must contain {port}, with strict-port mode if the server supports it.") }
+        guard project.start.contains("{port}") else { throw AppError.message("The Runs command must contain {port}, with strict-port mode if the server supports it.") }
+        try Self.checkFolders(project)
         let log = directory.appendingPathComponent("runtime-\(project.id).log")
         FileManager.default.createFile(atPath: log.path, contents: Data())
         let handle = try FileHandle(forWritingTo: log)
@@ -68,6 +81,25 @@ final class RuntimeManager {
         process.environment = environment; process.standardOutput = handle; process.standardError = handle
         try process.run(); try? handle.close()
         running[project.id] = Running(process: process, port: project.port, log: log, started: Date()); failures.removeValue(forKey: project.id)
+    }
+    /// Catches the common failure up front: a leading `cd` into a folder that doesn't exist on this Mac.
+    static func checkFolders(_ project: Project) throws {
+        var folder = URL(fileURLWithPath: project.path)
+        for part in project.start.components(separatedBy: "&&").dropLast() {
+            let step = part.trimmingCharacters(in: .whitespaces)
+            guard step.hasPrefix("cd ") else { break }
+            let target = (String(step.dropFirst(3)).trimmingCharacters(in: CharacterSet(charactersIn: " \"'")) as NSString).expandingTildeInPath
+            folder = target.hasPrefix("/") ? URL(fileURLWithPath: target) : folder.appendingPathComponent(target)
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: folder.path, isDirectory: &isDir), isDir.boolValue else {
+                throw AppError.message("\(project.name) can't start: \(folder.path) doesn't exist on this Mac. Fix the cd in its Runs command.")
+            }
+        }
+    }
+    /// The last thing the server printed, so a failure says why instead of "see log".
+    func lastLogLine(_ id: String) -> String? {
+        guard let text = try? String(contentsOf: directory.appendingPathComponent("runtime-\(id).log"), encoding: .utf8) else { return nil }
+        return text.split(separator: "\n").last { !$0.trimmingCharacters(in: .whitespaces).isEmpty }.map { String($0.prefix(160)) }
     }
     func stop(_ project: Project) throws {
         guard running[project.id]?.process.isRunning == true else { throw AppError.message("This app does not own a running process for \(project.name). It will not stop an unrelated listener.") }
@@ -99,4 +131,5 @@ final class RuntimeManager {
         }
     }
     var hasRunningProjects: Bool { running.values.contains { $0.process.isRunning } }
+    func isRunning(_ project: Project) -> Bool { running[project.id]?.process.isRunning == true }
 }

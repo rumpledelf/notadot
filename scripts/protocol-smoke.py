@@ -70,10 +70,13 @@ stream_max_retries = 0
                                   "required": ["action"], "additionalProperties": False}}]})
         thread = response["thread"]["id"]
         print("PASS: initialize and thread/start with native tool")
-        turn = client.call("turn/start", {"threadId": thread, "input": [{"type": "text", "text": "Offline fixture"}]})
+        # Same shape Notadot sends after a reconnect or compaction: a notes block, then the message.
+        turn = client.call("turn/start", {"threadId": thread, "input": [
+            {"type": "text", "text": "<notadot_notes>\n# Notes\n</notadot_notes>"},
+            {"type": "text", "text": "Offline fixture"}]})
         time.sleep(0.5)
         client.call("turn/interrupt", {"threadId": thread, "turnId": turn["turn"]["id"]})
-        print("PASS: offline turn starts and can be interrupted without a live model")
+        print("PASS: offline turn with a notes block starts and can be interrupted without a live model")
     finally:
         client.close()
     client = Client(home)

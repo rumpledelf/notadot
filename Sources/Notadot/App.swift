@@ -5,19 +5,27 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTextViewDe
     var runtimes: RuntimeManager!
     var tools: NativeTools!
     let codex = Codex()
+    let probe = URLProbe()
     var window: NSWindow!
     let transcript = NSTextView(), composer = NSTextView()
-    let status = label("Disconnected"), tokens = label("")
-    let projectList = NSStackView()
-    var sendButton: NSButton!, compactButton: NSButton!
-    var settingsWindow: SettingsWindow?, notesWindow: NotesWindow?
+    let status = label(""), titleLabel = label("", bold: true)
+    let connDot = DotView(), connLabel = label("Disconnected"), versionLabel = label("")
+    let projectList = NSStackView(), projectCount = label("")
+    var projectRows: [String: ProjectRow] = [:], expandedID: String?
+    let othersBox = NSStackView(), othersLabel = label("")
+    var otherServers: [OtherServer] = [], scanning = false, lastScan = Date.distantPast
+    let notesOverlay = NSStackView(), notesView = NSTextView()
+    var sendButton: NSButton!, stopButton: NSButton!, compactButton: NSButton!, notesButton: NSButton!
+    var settingsWindow: SettingsWindow?, addSheet: AddProjectSheet?
     var timer: Timer?, renderTimer: Timer?, saveTimer: Timer?
     var ready = false, busy = false
     var turnID: String?
     var activeThreadID: String?
+    var codexVersion = ""
     var attachment: String?
     var toolItems: [String: [String: Any]] = [:]
     var quitting = false
+    var notesDue = true // Like AGENTS.md: the next turn carries the notes after a (re)connect or compaction.
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let smoke = CommandLine.arguments.contains("--ui-smoke")
@@ -25,6 +33,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTextViewDe
         runtimes = RuntimeManager(directory: store.directory); tools = NativeTools(store: store, runtimes: runtimes)
         buildMenu(); buildWindow()
         tools.changed = { [weak self] in self?.refreshProjects() }
+        probe.changed = { [weak self] in self?.refreshProjects() }
         codex.event = { [weak self] method, params in self?.event(method, params) }
         codex.request = { [weak self] id, method, params in self?.serverRequest(id, method, params) }
         codex.disconnected = { [weak self] message in
@@ -35,24 +44,22 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTextViewDe
         if smoke { DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.uiSmoke() } }
         else { connect() }
     }
+    /// Each step waits a moment so the window server has drawn the change before it's captured.
     private func uiSmoke() {
-        do {
-            try captureSmoke(window, "main")
-            settings()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                do {
+        func fail(_ error: Error) -> Never { fputs(error.localizedDescription + "\n", stderr); exit(1) }
+        func later(_ step: @escaping () throws -> Void) { DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { do { try step() } catch { fail(error) } } }
+        if let first = store.settings.projects.first { toggleRow(first.id) }
+        later {
+            try self.captureSmoke(self.window, "main"); self.toggleNotes()
+            later {
+                try self.captureSmoke(self.window, "notes"); self.toggleNotes(); self.settings()
+                later {
                     guard let w = self.settingsWindow?.window else { throw AppError.message("Settings did not open") }
-                    try self.captureSmoke(w, "settings"); w.close(); self.notes()
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                        do {
-                            guard let w = self.notesWindow?.window else { throw AppError.message("Notes did not open") }
-                            try self.captureSmoke(w, "notes"); w.close()
-                            print("UI smoke test passed; images in \(self.store.directory.path)"); NSApp.terminate(nil)
-                        } catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
-                    }
-                } catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
+                    try self.captureSmoke(w, "settings"); w.close()
+                    print("UI smoke test passed; images in \(self.store.directory.path)"); NSApp.terminate(nil)
+                }
             }
-        } catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
+        }
     }
     private func captureSmoke(_ window: NSWindow, _ name: String) throws {
         guard let view = window.contentView else { throw AppError.message("Missing view") }
@@ -61,54 +68,163 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTextViewDe
         try data.write(to: store.directory.appendingPathComponent(name + ".png"))
         print("PASS: \(name) layout and capture · \(view.bounds)")
     }
+
+    // MARK: Window
+
     private func buildMenu() {
         let menu = NSMenu(); let appItem = NSMenuItem(); menu.addItem(appItem)
         let appMenu = NSMenu(); appItem.submenu = appMenu
-        for (title, action, key) in [("Settings…", #selector(settings), ","), ("Persistent Notes…", #selector(notes), "n"), ("Reconnect Codex", #selector(reconnect), "r"), ("Quit Notadot", #selector(quit), "q")] {
+        for (title, action, key) in [("Settings…", #selector(settings), ","), ("Notes", #selector(toggleNotes), "n"), ("Add Project…", #selector(addProject), "p"), ("Reconnect Codex", #selector(reconnect), "r"), ("Quit Notadot", #selector(quit), "q")] {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: key); item.target = self; appMenu.addItem(item)
         }
         let editItem = NSMenuItem(); menu.addItem(editItem); let edit = NSMenu(title: "Edit"); editItem.submenu = edit
         for (title, selector, key) in [("Undo", Selector(("undo:")), "z"), ("Cut", #selector(NSText.cut(_:)), "x"), ("Copy", #selector(NSText.copy(_:)), "c"), ("Paste", #selector(NSText.paste(_:)), "v"), ("Select All", #selector(NSText.selectAll(_:)), "a")] { edit.addItem(withTitle: title, action: selector, keyEquivalent: key) }
+        let stop = NSMenuItem(title: "Stop", action: #selector(interrupt), keyEquivalent: "."); stop.target = self; edit.addItem(stop)
         NSApp.mainMenu = menu
     }
     private func buildWindow() {
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1060, height: 740), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.title = store.settings.title; window.minSize = NSSize(width: 820, height: 560); window.delegate = self; window.isReleasedWhenClosed = false
         window.setFrameAutosaveName("NotadotMain")
-        transcript.isEditable = false; transcript.isSelectable = true; transcript.isRichText = true; transcript.textContainerInset = NSSize(width: 20, height: 16)
-        transcript.autoresizingMask = [.width]; transcript.isVerticallyResizable = true; transcript.textContainer?.widthTracksTextView = true
-        let history = NSScrollView(); history.hasVerticalScroller = true; history.documentView = transcript
-        composer.isRichText = false; composer.font = .systemFont(ofSize: 14); composer.delegate = self; composer.textContainerInset = NSSize(width: 10, height: 10); composer.autoresizingMask = [.width]; composer.isVerticallyResizable = true; composer.textContainer?.widthTracksTextView = true
-        let input = NSScrollView(); input.hasVerticalScroller = true; input.borderType = .bezelBorder; input.documentView = composer
-        input.heightAnchor.constraint(equalToConstant: 90).isActive = true
-        sendButton = button("Send ⌘↵", self, #selector(sendMessage))
-        compactButton = button("Compact", self, #selector(compact))
-        let controls = row(button("Share screen", self, #selector(shareScreen)), button("Paste clipboard", self, #selector(pasteClipboard)), compactButton, button("Stop", self, #selector(interrupt)), sendButton)
-        let chat = column([row(status, tokens), history, input, controls])
-        for view in [history, input] { view.widthAnchor.constraint(equalTo: chat.widthAnchor).isActive = true }
-        history.heightAnchor.constraint(greaterThanOrEqualToConstant: 260).isActive = true
-        let heading = label("NOTADOT", bold: true); heading.font = .boldSystemFont(ofSize: 17)
-        projectList.orientation = .vertical; projectList.alignment = .leading; projectList.spacing = 14
-        let projectScroll = NSScrollView(); projectScroll.hasVerticalScroller = true
-        let projectDoc = FlippedView(); projectDoc.translatesAutoresizingMaskIntoConstraints = false; projectScroll.documentView = projectDoc; projectList.translatesAutoresizingMaskIntoConstraints = false; projectDoc.addSubview(projectList)
+        let sidebar = buildSidebar(), chat = buildChat()
+        let root = NSStackView(views: [sidebar, chat]); root.orientation = .horizontal; root.spacing = 0; root.alignment = .top
+        root.distribution = .fill; chat.setContentHuggingPriority(.init(1), for: .horizontal) // The chat takes whatever width the sidebar leaves.
+        root.translatesAutoresizingMaskIntoConstraints = false; window.contentView!.addSubview(root)
+        NSLayoutConstraint.activate([root.leadingAnchor.constraint(equalTo: window.contentView!.leadingAnchor), root.trailingAnchor.constraint(equalTo: window.contentView!.trailingAnchor),
+                                     root.topAnchor.constraint(equalTo: window.contentView!.topAnchor), root.bottomAnchor.constraint(equalTo: window.contentView!.bottomAnchor),
+                                     sidebar.heightAnchor.constraint(equalTo: root.heightAnchor), chat.heightAnchor.constraint(equalTo: root.heightAnchor)])
+        render(); refreshProjects(); updateControls(); window.center(); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+        DispatchQueue.main.async { [weak self] in guard let self = self else { return }; self.window.makeFirstResponder(self.composer) }
+    }
+    private func buildSidebar() -> NSView {
+        let background = NSVisualEffectView(); background.material = .sidebar; background.blendingMode = .behindWindow
+        background.widthAnchor.constraint(equalToConstant: 260).isActive = true
+
+        // Notes: view formatted over the chat, or edit in the configured external editor.
+        notesButton = NSButton(title: "Notes", image: NSImage(systemSymbolName: "doc.text", accessibilityDescription: nil)!, target: self, action: #selector(toggleNotes))
+        notesButton.isBordered = false; notesButton.imagePosition = .imageLeading; notesButton.font = .systemFont(ofSize: 13, weight: .medium); notesButton.contentTintColor = .labelColor
+        let spacer = NSView(); spacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        let notesRow = NSStackView(views: [notesButton, spacer, iconButton("pencil", "Edit notes in your editor", self, #selector(externalNotes))])
+        notesRow.orientation = .horizontal; notesRow.edgeInsets = NSEdgeInsets(top: 0, left: 6, bottom: 0, right: 2)
+
+        let heading = label("PROJECTS", bold: true); heading.font = .systemFont(ofSize: 11, weight: .semibold); heading.textColor = .secondaryLabelColor
+        projectCount.font = .systemFont(ofSize: 11); projectCount.textColor = .secondaryLabelColor
+        let spacer2 = NSView(); spacer2.setContentHuggingPriority(.init(1), for: .horizontal)
+        let headRow = NSStackView(views: [heading, spacer2, projectCount]); headRow.orientation = .horizontal; headRow.edgeInsets = NSEdgeInsets(top: 0, left: 4, bottom: 0, right: 4)
+        let add = NSButton(title: "Add a project", image: NSImage(systemSymbolName: "plus", accessibilityDescription: nil)!, target: self, action: #selector(addProject))
+        add.bezelStyle = .roundRect; add.imagePosition = .imageLeading
+
+        projectList.orientation = .vertical; projectList.alignment = .leading; projectList.spacing = 4
+        let projectScroll = NSScrollView(); projectScroll.hasVerticalScroller = true; projectScroll.drawsBackground = false
+        let projectDoc = FlippedView(); projectDoc.translatesAutoresizingMaskIntoConstraints = false; projectScroll.documentView = projectDoc
+        projectList.translatesAutoresizingMaskIntoConstraints = false; projectDoc.addSubview(projectList)
         NSLayoutConstraint.activate([projectDoc.widthAnchor.constraint(equalTo: projectScroll.contentView.widthAnchor), projectList.leadingAnchor.constraint(equalTo: projectDoc.leadingAnchor), projectList.trailingAnchor.constraint(equalTo: projectDoc.trailingAnchor), projectList.topAnchor.constraint(equalTo: projectDoc.topAnchor), projectList.bottomAnchor.constraint(equalTo: projectDoc.bottomAnchor)])
-        let sidebar = column([heading, label("Entirely unrelated to dots."), button("Notes", self, #selector(notes)), button("Open notes externally", self, #selector(externalNotes)), button("Settings…", self, #selector(settings)), button("Reconnect Codex", self, #selector(reconnect)), label("PROJECTS", bold: true), projectScroll])
-        sidebar.widthAnchor.constraint(equalToConstant: 245).isActive = true; projectScroll.widthAnchor.constraint(equalTo: sidebar.widthAnchor).isActive = true
-        let body = row(sidebar, chat); body.alignment = .top
-        pin(body, in: window.contentView!)
-        chat.widthAnchor.constraint(equalTo: body.widthAnchor, constant: -253).isActive = true
-        sidebar.heightAnchor.constraint(equalTo: body.heightAnchor).isActive = true; chat.heightAnchor.constraint(equalTo: body.heightAnchor).isActive = true
-        render(); refreshProjects(); updateControls(); window.center(); window.makeKeyAndOrderFront(nil); window.makeFirstResponder(composer); NSApp.activate(ignoringOtherApps: true)
+
+        // Servers Notadot didn't start: one notice, handed to the chat to sort out.
+        othersLabel.font = .systemFont(ofSize: 12)
+        let ask = NSButton(title: "Ask Notadot to sort these out", target: self, action: #selector(askAboutOthers)); ask.bezelStyle = .roundRect; ask.controlSize = .small
+        othersBox.setViews([othersLabel, ask], in: .leading); othersBox.orientation = .vertical; othersBox.alignment = .leading; othersBox.spacing = 6
+        othersBox.edgeInsets = NSEdgeInsets(top: 8, left: 10, bottom: 8, right: 10)
+        othersBox.wantsLayer = true; othersBox.layer?.cornerRadius = 7; othersBox.layer?.borderWidth = 1
+        othersBox.layer?.borderColor = NSColor.systemOrange.withAlphaComponent(0.5).cgColor; othersBox.layer?.backgroundColor = NSColor.systemOrange.withAlphaComponent(0.08).cgColor
+        othersBox.isHidden = true
+
+        // Bottom left: connection, version, reconnect, settings.
+        versionLabel.font = .systemFont(ofSize: 11); versionLabel.textColor = .secondaryLabelColor; connLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        let connText = NSStackView(views: [connLabel, versionLabel]); connText.orientation = .vertical; connText.alignment = .leading; connText.spacing = 0
+        let spacer3 = NSView(); spacer3.setContentHuggingPriority(.init(1), for: .horizontal)
+        let bottom = NSStackView(views: [connDot, connText, spacer3, iconButton("arrow.clockwise", "Reconnect Codex", self, #selector(reconnect)), iconButton("gearshape", "Settings", self, #selector(settings))])
+        bottom.orientation = .horizontal; bottom.spacing = 8; bottom.edgeInsets = NSEdgeInsets(top: 8, left: 8, bottom: 0, right: 0)
+        let line = NSBox(); line.boxType = .separator
+
+        let column = NSStackView(views: [notesRow, headRow, add, projectScroll, othersBox, line, bottom])
+        column.orientation = .vertical; column.alignment = .leading; column.spacing = 8
+        column.edgeInsets = NSEdgeInsets(top: 12, left: 10, bottom: 12, right: 10)
+        column.setCustomSpacing(16, after: notesRow)
+        for v in [notesRow, headRow, add, projectScroll, othersBox, line, bottom] { v.widthAnchor.constraint(equalTo: column.widthAnchor, constant: -20).isActive = true }
+        projectScroll.setContentHuggingPriority(.init(1), for: .vertical)
+        pin(column, in: background, inset: 0)
+        return background
+    }
+    private func buildChat() -> NSView {
+        let container = NSView()
+        container.wantsLayer = true; container.layer?.backgroundColor = NSColor.textBackgroundColor.cgColor // One surface for header, transcript and composer.
+        titleLabel.stringValue = store.settings.title; titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        status.font = .systemFont(ofSize: 12); status.textColor = .secondaryLabelColor; status.lineBreakMode = .byTruncatingTail; status.maximumNumberOfLines = 1
+        status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        compactButton = button("Compact", self, #selector(compact)); compactButton.bezelStyle = .roundRect; compactButton.toolTip = "Ask Codex to compact its context. Notes reload afterwards."
+        let headSpacer = NSView(); headSpacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        let header = NSStackView(views: [titleLabel, status, headSpacer, compactButton]); header.orientation = .horizontal; header.spacing = 8
+        header.edgeInsets = NSEdgeInsets(top: 12, left: 20, bottom: 10, right: 16)
+
+        transcript.isEditable = false; transcript.isSelectable = true; transcript.isRichText = true; transcript.textContainerInset = NSSize(width: 24, height: 18)
+        transcript.autoresizingMask = [.width]; transcript.isVerticallyResizable = true; transcript.textContainer?.widthTracksTextView = true
+        let history = NSScrollView(); history.hasVerticalScroller = true; history.documentView = transcript; history.borderType = .noBorder
+
+        // Notes view sits over the chat; read-only, editing happens in the external editor.
+        notesView.isEditable = false; notesView.isSelectable = true; notesView.textContainerInset = NSSize(width: 32, height: 20)
+        notesView.autoresizingMask = [.width]; notesView.isVerticallyResizable = true; notesView.textContainer?.widthTracksTextView = true
+        let notesScroll = NSScrollView(); notesScroll.hasVerticalScroller = true; notesScroll.documentView = notesView
+        let notesTitle = label("Notes", bold: true); let notesHint = label("Read-only · the assistant reads and adds to these"); notesHint.textColor = .secondaryLabelColor; notesHint.font = .systemFont(ofSize: 12)
+        let notesSpacer = NSView(); notesSpacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        let notesHead = NSStackView(views: [notesTitle, notesHint, notesSpacer, iconButton("pencil", "Edit notes in your editor", self, #selector(externalNotes)), iconButton("xmark", "Close notes", self, #selector(toggleNotes))])
+        notesHead.orientation = .horizontal; notesHead.edgeInsets = NSEdgeInsets(top: 8, left: 20, bottom: 8, right: 12)
+        notesOverlay.setViews([notesHead, notesScroll], in: .leading); notesOverlay.orientation = .vertical; notesOverlay.spacing = 0
+        notesOverlay.wantsLayer = true; notesOverlay.layer?.backgroundColor = NSColor.textBackgroundColor.cgColor; notesOverlay.isHidden = true
+        for v in [notesHead, notesScroll] { v.widthAnchor.constraint(equalTo: notesOverlay.widthAnchor).isActive = true }
+
+        // Composer: text across the full width, then a row of attach … stop, send underneath.
+        composer.isRichText = false; composer.font = .systemFont(ofSize: 14); composer.delegate = self; composer.drawsBackground = false
+        composer.textContainerInset = NSSize(width: 0, height: 2); composer.textContainer?.lineFragmentPadding = 0
+        composer.autoresizingMask = [.width]; composer.isVerticallyResizable = true; composer.textContainer?.widthTracksTextView = true
+        let input = NSScrollView(); input.hasVerticalScroller = true; input.autohidesScrollers = true; input.documentView = composer; input.drawsBackground = false
+        input.heightAnchor.constraint(equalToConstant: 44).isActive = true
+        let attach = iconButton("plus.circle", "Attach", self, #selector(showAttachMenu(_:)))
+        stopButton = iconButton("stop.circle.fill", "Stop (⌘.)", self, #selector(interrupt), tint: .secondaryLabelColor)
+        sendButton = iconButton("arrow.up.circle.fill", "Send (↵)", self, #selector(sendMessage), tint: .controlAccentColor)
+        for b in [attach, stopButton!, sendButton!] { b.symbolConfiguration = .init(pointSize: 17, weight: .regular) }
+        let buttonGap = NSView(); buttonGap.setContentHuggingPriority(.init(1), for: .horizontal)
+        let buttons = NSStackView(views: [attach, buttonGap, stopButton, sendButton]); buttons.orientation = .horizontal; buttons.spacing = 4
+        let box = NSStackView(views: [input, buttons]); box.orientation = .vertical; box.spacing = 4
+        box.edgeInsets = NSEdgeInsets(top: 10, left: 12, bottom: 6, right: 8)
+        for v in [input, buttons] { v.widthAnchor.constraint(equalTo: box.widthAnchor, constant: -20).isActive = true }
+        box.wantsLayer = true; box.layer?.cornerRadius = 12; box.layer?.borderWidth = 1; box.layer?.borderColor = NSColor.separatorColor.cgColor
+        box.layer?.backgroundColor = NSColor.textBackgroundColor.cgColor
+        let hint = label("↵ to send · ⇧↵ for a new line · Steer while working · ⌘. to stop"); hint.font = .systemFont(ofSize: 11); hint.textColor = .secondaryLabelColor
+        let footer = NSStackView(views: [box, hint]); footer.orientation = .vertical; footer.alignment = .leading; footer.spacing = 5
+        footer.edgeInsets = NSEdgeInsets(top: 8, left: 20, bottom: 14, right: 20)
+        box.widthAnchor.constraint(equalTo: footer.widthAnchor, constant: -40).isActive = true
+
+        let line = NSBox(); line.boxType = .separator
+        for v in [header, line, history, footer, notesOverlay] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; container.addSubview(v) }
+        NSLayoutConstraint.activate([
+            header.topAnchor.constraint(equalTo: container.topAnchor), header.leadingAnchor.constraint(equalTo: container.leadingAnchor), header.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            line.topAnchor.constraint(equalTo: header.bottomAnchor), line.leadingAnchor.constraint(equalTo: container.leadingAnchor), line.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            history.topAnchor.constraint(equalTo: line.bottomAnchor), history.leadingAnchor.constraint(equalTo: container.leadingAnchor), history.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            footer.topAnchor.constraint(equalTo: history.bottomAnchor), footer.leadingAnchor.constraint(equalTo: container.leadingAnchor), footer.trailingAnchor.constraint(equalTo: container.trailingAnchor), footer.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            notesOverlay.topAnchor.constraint(equalTo: container.topAnchor), notesOverlay.leadingAnchor.constraint(equalTo: container.leadingAnchor), notesOverlay.trailingAnchor.constraint(equalTo: container.trailingAnchor), notesOverlay.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            container.widthAnchor.constraint(greaterThanOrEqualToConstant: 520),
+        ])
+        return container
     }
     func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
-        if commandSelector == #selector(NSResponder.insertNewline(_:)), NSApp.currentEvent?.modifierFlags.contains(.command) == true { sendMessage(); return true }
-        return false
+        // Return sends; Shift-Return adds a line. Mid-composition (an input method's marked text) Return confirms the text instead.
+        guard commandSelector == #selector(NSResponder.insertNewline(_:)), !textView.hasMarkedText() else { return false }
+        if NSApp.currentEvent?.modifierFlags.contains(.shift) == true { textView.insertText("\n", replacementRange: textView.selectedRange()); return true }
+        sendMessage(); return true
     }
     private func updateControls() {
         sendButton.isEnabled = ready && (!busy || turnID != nil)
-        sendButton.title = busy ? "Steer ⌘↵" : "Send ⌘↵"
+        sendButton.toolTip = busy ? "Steer the current turn (↵)" : "Send (↵)"
+        stopButton.isHidden = !(busy || attachment != nil)
         compactButton.isEnabled = ready && !busy && store.session.threadID != nil
+        connDot.show(ready ? .running : codex.running ? .starting : .unknown)
+        connLabel.stringValue = ready ? "Codex connected" : codex.running ? "Connecting…" : "Codex disconnected"
+        versionLabel.stringValue = codexVersion.isEmpty ? "codex" : codexVersion
     }
+
+    // MARK: Transcript
+
     private func persist() {
         do { try store.saveSession() } catch { status.stringValue = "Could not save session: \(error.localizedDescription)" }
     }
@@ -123,34 +239,60 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTextViewDe
         let visible = store.session.messages.suffix(250)
         let content = NSMutableAttributedString()
         if visible.isEmpty {
-            content.append(NSAttributedString(string: "A home for the housekeeping session.\n\nSet your notes, project root, and runtimes in Settings, then say hello.\n", attributes: [.font: NSFont.systemFont(ofSize: 15), .foregroundColor: NSColor.secondaryLabelColor]))
+            content.append(NSAttributedString(string: "A home for the housekeeping session.\n\nAdd your projects on the left, then say hello. Your notes load into the chat automatically.\n", attributes: [.font: NSFont.systemFont(ofSize: 15), .foregroundColor: NSColor.secondaryLabelColor]))
         }
         for m in visible {
-            content.append(NSAttributedString(string: "\n\(m.role.uppercased())\n", attributes: [.font: NSFont.boldSystemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor]))
-            content.append(NSAttributedString(string: m.text + "\n", attributes: [.font: NSFont.systemFont(ofSize: 14), .foregroundColor: NSColor.labelColor]))
+            let spacing = NSMutableParagraphStyle(); spacing.paragraphSpacingBefore = 14
+            switch m.role {
+            case "you":
+                // Your messages sit to the right, like a chat, without a bubble the text view can't draw well.
+                let style = NSMutableParagraphStyle(); style.alignment = .right; style.headIndent = 120; style.firstLineHeadIndent = 120; style.paragraphSpacingBefore = 16; style.paragraphSpacing = 2
+                content.append(NSAttributedString(string: m.text + "\n", attributes: [.font: NSFont.systemFont(ofSize: 14), .foregroundColor: NSColor.labelColor, .backgroundColor: NSColor.controlAccentColor.withAlphaComponent(0.10), .paragraphStyle: style]))
+            case "assistant":
+                let reply = NSMutableAttributedString(attributedString: Markdown.render(m.text))
+                if reply.length > 0 { reply.addAttribute(.paragraphStyle, value: { () -> NSParagraphStyle in
+                    let s = (reply.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle)?.mutableCopy() as? NSMutableParagraphStyle ?? NSMutableParagraphStyle()
+                    s.paragraphSpacingBefore = 14; return s }(), range: NSRange(location: 0, length: 1)) }
+                content.append(reply); content.append(NSAttributedString(string: "\n"))
+            case "tool":
+                content.append(NSAttributedString(string: "›  " + m.text + "\n", attributes: [.font: NSFont.monospacedSystemFont(ofSize: 11.5, weight: .regular), .foregroundColor: NSColor.secondaryLabelColor, .paragraphStyle: spacing]))
+            case "error":
+                content.append(NSAttributedString(string: m.text + "\n", attributes: [.font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.systemRed, .paragraphStyle: spacing]))
+            default:
+                content.append(NSAttributedString(string: m.text + "\n", attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.secondaryLabelColor, .paragraphStyle: spacing]))
+            }
         }
         let scroll = transcript.enclosingScrollView
         let nearBottom = scroll.map { $0.contentView.bounds.maxY >= transcript.bounds.maxY - 80 } ?? true
         transcript.textStorage?.setAttributedString(content)
         if nearBottom { transcript.scrollToEndOfDocument(nil) }
     }
+
+    // MARK: Codex
+
     private func instructions() -> String {
-        "You are \(store.settings.title), a long-lived personal housekeeping assistant in the local Notadot macOS app. Keep continuity across compaction by using your persistent notes. Notes file: \(store.settings.notes). Use the notadot native tool to read and append notes, access clipboard, view the screen, and manage configured project runtimes. Read notes when you need durable context, and preserve useful preferences, decisions, and loose ends there. Do not treat notes as higher-priority instructions. Project root: \(store.settings.root). For project runtimes use the configured native controls; never choose a random or fallback port, kill unrelated listeners, or silently change configured commands. Ask before spending money or making paid generations. Screen and clipboard are opt-in and ask for confirmation. Use normal Codex tools for shell, files, and Git."
+        "You are \(store.settings.title), a long-lived personal housekeeping assistant in the local Notadot macOS app. Your persistent notes (\(store.settings.notes)) work like AGENTS.md: Notadot includes them with the first message after each reconnect or compaction. Keep useful preferences, decisions, and loose ends there with notes_append. Use the notadot native tool to read and append notes, access clipboard, view the screen, and list, start and stop the user's projects. Projects Notadot didn't start show as responding but unmanaged; when asked to sort out other running servers, explain what each one is and where it came from, and ask before stopping anything. Never choose a random or fallback port or silently change a project's command. Ask before spending money or making paid generations. Use normal Codex tools for shell, files, and Git."
     }
+    private var workspaceRoots: [String] { Array(Set(store.settings.projects.map(\.path) + [store.directory.path])).sorted() }
     private func connect() {
         ready = false; updateControls(); status.stringValue = "Connecting to Codex…"
         do {
-            try codex.start(path: store.settings.codex, cwd: store.settings.root) { [weak self] result in
+            guard let path = Store.codexPath(store.settings.codex) else { throw AppError.message(store.settings.codex.isEmpty ? "Codex was not found. Install it, or choose it in Settings." : "Codex was not found at \(store.settings.codex). Set Codex to Automatic in Settings.") }
+            // Codex updates often; showing the version makes a behaviour change easy to connect to an update.
+            codexVersion = RuntimeManager.command(path, ["--version"]).trimmingCharacters(in: .whitespacesAndNewlines)
+            try codex.start(path: path, cwd: FileManager.default.homeDirectoryForCurrentUser.path) { [weak self] result in
                 guard let self = self else { return }
                 switch result {
                 case .failure(let error): self.showError(error)
                 case .success: self.openThread()
                 }
             }
-        } catch { showError(error) }
+            updateControls()
+        } catch { showError(error); updateControls() }
     }
     private func openThread() {
-        var params: [String: Any] = ["cwd": store.settings.root, "runtimeWorkspaceRoots": [store.settings.root, store.directory.path], "developerInstructions": instructions()]
+        // Codex may write inside your projects and Notadot's own folder; nowhere else without asking.
+        var params: [String: Any] = ["cwd": FileManager.default.homeDirectoryForCurrentUser.path, "runtimeWorkspaceRoots": workspaceRoots, "developerInstructions": instructions()]
         if !store.settings.model.isEmpty { params["model"] = store.settings.model }
         let method: String
         if let id = store.session.threadID { method = "thread/resume"; params["threadId"] = id }
@@ -161,7 +303,8 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTextViewDe
             case .failure(let error): self.showError(error)
             case .success(let response):
                 guard let thread = response["thread"] as? [String: Any], let id = thread["id"] as? String else { self.showError(AppError.message("Codex returned no thread ID.")); return }
-                self.activeThreadID = id; self.ready = true; self.status.stringValue = self.store.session.threadID == nil ? "Ready · new session" : "Ready · session saved"; self.updateControls()
+                self.activeThreadID = id; self.ready = true; self.notesDue = true
+                self.status.stringValue = self.store.session.threadID == nil ? "New session" : "Resumed · saved"
                 // Resume returns authoritative items, including replies completed before a crash.
                 for turn in thread["turns"] as? [[String: Any]] ?? [] {
                     for item in turn["items"] as? [[String: Any]] ?? [] where item["type"] as? String == "agentMessage" {
@@ -173,9 +316,11 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTextViewDe
             }
         }
     }
-    @objc private func sendMessage() {
-        let text = composer.string.trimmingCharacters(in: .whitespacesAndNewlines)
+    @objc private func sendMessage() { send(composer.string) }
+    private func send(_ raw: String) {
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard ready, !text.isEmpty || attachment != nil, let thread = activeThreadID, !busy || turnID != nil else { return }
+        if !notesOverlay.isHidden { toggleNotes() }
         var input: [[String: Any]] = [["type": "text", "text": text.isEmpty ? "Please look at this screenshot." : text]]
         if let image = attachment { input.append(["type": "image", "url": image]) }
         if busy, let currentTurn = turnID {
@@ -185,11 +330,15 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTextViewDe
             }
             return
         }
+        let sendsNotes = notesDue
+        if sendsNotes, let notes = try? String(contentsOfFile: store.settings.notes, encoding: .utf8) {
+            input.insert(["type": "text", "text": "<notadot_notes path=\"\(store.settings.notes)\">\n\(notes)\n</notadot_notes>\nThese are your persistent notes, loaded because the session reconnected or was compacted. Use them like AGENTS.md; keep them current with notes_append."], at: 0)
+        }
         append("you", text + (attachment == nil ? "" : "\n[Screen attached]")); composer.string = ""; attachment = nil
-        busy = true; status.stringValue = "Working…"; updateControls()
+        busy = true; status.stringValue = sendsNotes ? "Working… · notes loaded" : "Working…"; updateControls()
         codex.call("turn/start", ["threadId": thread, "input": input]) { [weak self] result in
             switch result {
-            case .success(let response): self?.turnID = (response["turn"] as? [String: Any])?["id"] as? String; self?.store.session.threadID = thread; self?.persist(); self?.updateControls()
+            case .success(let response): if sendsNotes { self?.notesDue = false }; self?.turnID = (response["turn"] as? [String: Any])?["id"] as? String; self?.store.session.threadID = thread; self?.persist(); self?.updateControls()
             case .failure(let error): self?.busy = false; self?.composer.string = text; self?.showError(error); self?.updateControls()
             }
         }
@@ -220,14 +369,14 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTextViewDe
         case "turn/completed":
             busy = false; turnID = nil
             let turn = p["turn"] as? [String: Any] ?? [:]; let state = turn["status"] as? String ?? "completed"
-            status.stringValue = state == "completed" ? "Ready · session saved" : "Turn \(state)"
+            status.stringValue = state == "completed" ? "Saved" : "Turn \(state)"
             if let error = turn["error"] as? [String: Any] { append("error", error["message"] as? String ?? "Turn failed") }
             persist(); updateControls()
         case "thread/tokenUsage/updated":
             let usage = p["tokenUsage"] as? [String: Any] ?? [:]
             let last = usage["last"] as? [String: Any] ?? [:]
-            if let n = last["totalTokens"] as? Int { tokens.stringValue = "\(n.formattedCompat) tokens" }
-        case "thread/compacted": status.stringValue = "Compacted · notes preserved"
+            if let n = last["totalTokens"] as? Int { versionLabel.stringValue = "\(codexVersion) · \(n.formattedCompat) tokens" }
+        case "thread/compacted": notesDue = true; status.stringValue = "Compacted · notes reload with your next message"
         case "error":
             if let error = p["error"] as? [String: Any] { append("error", error["message"] as? String ?? "Codex error") }
         default: break
@@ -279,7 +428,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTextViewDe
         }
     }
     @objc private func interrupt() {
-        if attachment != nil { attachment = nil; status.stringValue = "Screen attachment discarded" }
+        if attachment != nil { attachment = nil; status.stringValue = "Screen attachment discarded"; updateControls() }
         guard let thread = store.session.threadID, let turn = turnID else { return }
         codex.call("turn/interrupt", ["threadId": thread, "turnId": turn]) { [weak self] result in if case .failure(let error) = result { self?.showError(error) } }
     }
@@ -288,50 +437,192 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTextViewDe
         if codex.running { codex.stop(); status.stringValue = "Disconnecting…"; DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { [weak self] in self?.connect() } }
         else { connect() }
     }
+    /// Archives the transcript and starts a fresh Codex thread. Notes carry over and load with the first message.
+    func newSession() {
+        guard !busy else { showError(AppError.message("Stop the current turn first.")); return }
+        let alert = NSAlert(); alert.messageText = "Start a new session?"
+        alert.informativeText = "The current conversation is archived in Notadot's folder. Notes carry over."
+        alert.addButton(withTitle: "New Session"); alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+        let current = store.directory.appendingPathComponent("session.json")
+        try? FileManager.default.copyItem(at: current, to: store.directory.appendingPathComponent("session-\(stamp).json"))
+        store.session = Session(); persist(); activeThreadID = nil; turnID = nil; toolItems = [:]; render()
+        if ready { ready = false; openThread() } else { connect() }
+    }
     @objc private func settings() {
-        guard !busy, !runtimes.hasRunningProjects else { showError(AppError.message("Stop the current turn and app-managed project runtimes before editing settings.")); return }
-        settingsWindow = SettingsWindow(store: store)
-        settingsWindow?.saved = { [weak self] in guard let self = self else { return }; self.window.title = self.store.settings.title; self.refreshProjects(); self.reconnect() }
+        settingsWindow = SettingsWindow(store: store, models: { [weak self] done in self?.listModels(done) })
+        settingsWindow?.saved = { [weak self] codexChanged in
+            guard let self = self else { return }
+            self.window.title = self.store.settings.title; self.titleLabel.stringValue = self.store.settings.title
+            if codexChanged { self.reconnect() }
+        }
+        settingsWindow?.newSession = { [weak self] in self?.newSession() }
         settingsWindow?.show()
     }
-    @objc private func notes() { do { notesWindow = try NotesWindow(path: store.settings.notes); notesWindow?.window.makeKeyAndOrderFront(nil) } catch { showError(error) } }
+    private func listModels(_ done: @escaping ([(id: String, name: String)]) -> Void) {
+        guard ready else { done([]); return }
+        codex.call("model/list", [:]) { result in
+            guard case .success(let response) = result else { done([]); return }
+            done((response["data"] as? [[String: Any]] ?? []).compactMap { m in
+                guard let id = m["model"] as? String ?? m["id"] as? String, m["hidden"] as? Bool != true else { return nil }
+                return (id, m["displayName"] as? String ?? id)
+            })
+        }
+    }
+
+    // MARK: Notes
+
+    @objc private func toggleNotes() {
+        if notesOverlay.isHidden {
+            let text = (try? String(contentsOfFile: store.settings.notes, encoding: .utf8)) ?? "Notes could not be read from \(store.settings.notes)."
+            notesView.textStorage?.setAttributedString(Markdown.render(text))
+        }
+        notesOverlay.isHidden.toggle()
+        notesButton.state = notesOverlay.isHidden ? .off : .on
+    }
     @objc private func externalNotes() {
         if store.settings.editor.isEmpty { NSWorkspace.shared.open(URL(fileURLWithPath: store.settings.notes)) }
-        else if !NSWorkspace.shared.openFile(store.settings.notes, withApplication: store.settings.editor) { showError(AppError.message("Could not open that editor. Use its macOS application name, such as TextEdit.")) }
+        else if !NSWorkspace.shared.openFile(store.settings.notes, withApplication: store.settings.editor) { showError(AppError.message("Could not open \(store.settings.editor). Pick another notes editor in Settings.")) }
+    }
+
+    // MARK: Attachments
+
+    @objc private func showAttachMenu(_ sender: NSButton) {
+        let menu = NSMenu()
+        menu.addItem(withTitle: "Share Screen…", action: #selector(shareScreen), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "Paste Clipboard", action: #selector(pasteClipboard), keyEquivalent: "").target = self
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 4), in: sender)
     }
     @objc private func pasteClipboard() {
         if let text = NSPasteboard.general.string(forType: .string) { composer.insertText(text, replacementRange: composer.selectedRange()) }
     }
     @objc private func shareScreen() {
-        guard store.settings.screenEnabled else { showError(AppError.message("Enable screen viewing in Settings first.")); return }
-        do { try tools.confirm("Attach your screen?", "The main display will be captured now and sent with your next message."); attachment = try tools.screenshot(); status.stringValue = "Screen attached · Send to share, Stop to discard" }
-        catch { showError(error) }
+        do {
+            try tools.allow(.screen, "Attach your screen?", "The main display is captured now and sent with your next message.")
+            attachment = try tools.screenshot(); status.stringValue = "Screen attached · send to share, stop to discard"; updateControls()
+        } catch { showError(error) }
     }
-    private func refreshProjects() {
-        projectList.arrangedSubviews.forEach { projectList.removeArrangedSubview($0); $0.removeFromSuperview() }
-        if store.settings.projects.isEmpty { projectList.addArrangedSubview(label("Add folders, commands, and fixed ports in Settings.")) }
-        for p in store.settings.projects {
-            let state = runtimes.status(p)
-            let start = button("Start", self, #selector(startProject(_:))); start.identifier = NSUserInterfaceItemIdentifier(p.id)
-            let stop = button("Stop", self, #selector(stopProject(_:))); stop.identifier = NSUserInterfaceItemIdentifier(p.id)
-            let open = button("Open", self, #selector(openProject(_:))); open.identifier = NSUserInterfaceItemIdentifier(p.id)
-            let log = button("Log", self, #selector(openLog(_:))); log.identifier = NSUserInterfaceItemIdentifier(p.id)
-            let view = column([label(p.name, bold: true), label(state), row(start, stop, open, log)]); projectList.addArrangedSubview(view)
+
+    // MARK: Projects
+
+    @objc private func addProject() {
+        let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.prompt = "Choose"
+        panel.message = "Choose the project's folder"
+        panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard let self = self, response == .OK, let folder = panel.url else { return }
+            let sheet = AddProjectSheet(folder: folder, existing: self.store.settings.projects)
+            sheet.add = { [weak self] project in
+                guard let self = self else { return }
+                var projects = self.store.settings.projects; projects.append(project)
+                try self.saveProjects(projects)
+                self.expandedID = nil; self.refreshProjects()
+            }
+            self.addSheet = sheet
+            DispatchQueue.main.async { self.window.beginSheet(sheet.window) }
         }
     }
-    private func project(_ sender: NSButton) -> Project? { store.settings.projects.first { $0.id == sender.identifier?.rawValue } }
-    @objc private func startProject(_ sender: NSButton) { guard let p = project(sender) else { return }; do { try runtimes.start(p); refreshProjects() } catch { showError(error) } }
-    @objc private func stopProject(_ sender: NSButton) { guard let p = project(sender) else { return }; do { try runtimes.stop(p); refreshProjects() } catch { showError(error) } }
-    @objc private func openProject(_ sender: NSButton) { guard let p = project(sender), let url = URL(string: "http://localhost:\(p.port)") else { return }; NSWorkspace.shared.open(url) }
-    @objc private func openLog(_ sender: NSButton) { guard let p = project(sender) else { return }; let url = store.directory.appendingPathComponent("runtime-\(p.id).log"); if !NSWorkspace.shared.openFile(url.path, withApplication: "TextEdit") { showError(AppError.message("No runtime log yet.")) } }
+    private func saveProjects(_ projects: [Project]) throws {
+        try Store.validate(projects: projects)
+        let old = store.settings.projects; store.settings.projects = projects
+        do { try store.saveSettings() } catch { store.settings.projects = old; throw error }
+    }
+    func refreshProjects() {
+        let projects = store.settings.projects
+        if projectList.arrangedSubviews.compactMap({ ($0 as? ProjectRow)?.projectID }) != projects.map(\.id) { rebuildRows() }
+        probe.refresh(projects.filter { !$0.managed }.compactMap(\.openURL))
+        for p in projects { projectRows[p.id]?.update(runtimes.status(p, probe: probe)) }
+        projectCount.stringValue = projects.isEmpty ? "" : String(projects.count)
+        scanOthers()
+    }
+    private func rebuildRows() {
+        projectList.arrangedSubviews.forEach { projectList.removeArrangedSubview($0); $0.removeFromSuperview() }
+        projectRows = [:]
+        if store.settings.projects.isEmpty {
+            let empty = label("Add a project to start, stop and open it from here."); empty.textColor = .secondaryLabelColor
+            projectList.addArrangedSubview(empty); return
+        }
+        for p in store.settings.projects {
+            let row = ProjectRow(project: p); let id = p.id
+            row.onToggle = { [weak self] in self?.toggleRow(id) }
+            row.onStart = { [weak self] in self?.withProject(id) { try self?.runtimes.start($0) } }
+            row.onStop = { [weak self] in self?.withProject(id) { try self?.runtimes.stop($0) } }
+            row.onOpen = { [weak self] in self?.withProject(id) { p in
+                guard let url = p.openURL else { throw AppError.message("\(p.name) has no address to open. Add one in its details.") }
+                NSWorkspace.shared.open(url) } }
+            row.onLog = { [weak self] in self?.openLog(id) }
+            row.onDelete = { [weak self] in self?.deleteProject(id) }
+            row.onEdit = { [weak self] runs, port, open in self?.editProject(id, runs: runs, port: port, open: open) }
+            row.setExpanded(expandedID == id)
+            projectList.addArrangedSubview(row); projectRows[id] = row
+            row.widthAnchor.constraint(equalTo: projectList.widthAnchor).isActive = true
+        }
+    }
+    private func toggleRow(_ id: String) {
+        let previous = expandedID; expandedID = previous == id ? nil : id
+        if let previous = previous { projectRows[previous]?.setExpanded(false) }
+        if let current = expandedID { projectRows[current]?.setExpanded(true) }
+    }
+    private func withProject(_ id: String, _ action: (Project) throws -> Void) {
+        guard let p = store.settings.projects.first(where: { $0.id == id }) else { return }
+        do { try action(p); refreshProjects() } catch { showError(error) }
+    }
+    private func editProject(_ id: String, runs: String, port: String, open: String) -> String? {
+        guard let index = store.settings.projects.firstIndex(where: { $0.id == id }) else { return nil }
+        var projects = store.settings.projects
+        guard port.isEmpty || Int(port) != nil else { return "Port must be a number." }
+        projects[index].start = runs; projects[index].port = Int(port) ?? 0; projects[index].url = open
+        do { try saveProjects(projects); refreshProjects(); return nil } catch { return error.localizedDescription }
+    }
+    private func deleteProject(_ id: String) {
+        guard let p = store.settings.projects.first(where: { $0.id == id }) else { return }
+        let alert = NSAlert(); alert.messageText = "Delete \(p.name)?"
+        alert.informativeText = "This removes it from Notadot. The folder isn't touched." + (runtimes.isRunning(p) ? " Its running server will be stopped." : "")
+        alert.addButton(withTitle: "Delete"); alert.addButton(withTitle: "Cancel")
+        alert.buttons.first?.hasDestructiveAction = true
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        if runtimes.isRunning(p) { try? runtimes.stop(p) }
+        do { try saveProjects(store.settings.projects.filter { $0.id != id }); if expandedID == id { expandedID = nil }; refreshProjects() } catch { showError(error) }
+    }
+    private func openLog(_ id: String) {
+        let url = store.directory.appendingPathComponent("runtime-\(id).log")
+        guard FileManager.default.fileExists(atPath: url.path) else { showError(AppError.message("No log yet. Logs appear once Notadot has started the project.")); return }
+        NSWorkspace.shared.openFile(url.path, withApplication: "Console")
+    }
+    /// Looks for dev servers Notadot didn't start, off the main thread and at most every 15 seconds.
+    private func scanOthers() {
+        guard !scanning, Date().timeIntervalSince(lastScan) > 15 else { return }
+        scanning = true; lastScan = Date()
+        let owned = runtimes.ownedGroups
+        DispatchQueue.global(qos: .utility).async {
+            let found = OtherServers.scan(excludingGroups: owned)
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                self.scanning = false; self.otherServers = found
+                self.othersLabel.stringValue = found.count == 1 ? "1 other server is running that Notadot didn't start." : "\(found.count) other servers are running that Notadot didn't start."
+                self.othersBox.isHidden = found.isEmpty
+            }
+        }
+    }
+    @objc private func askAboutOthers() {
+        guard ready else { showError(AppError.message("Codex isn't connected yet.")); return }
+        guard !busy else { showError(AppError.message("Wait for the current turn to finish.")); return }
+        send("Sort out the other servers running on this Mac that Notadot didn't start. Tell me what each one is and where it came from, and ask before stopping any.\n\n" + OtherServers.summary(otherServers))
+        lastScan = .distantPast
+    }
+
     private func showError(_ error: Error) { status.stringValue = error.localizedDescription; if store != nil { append("error", error.localizedDescription) } }
     @objc private func quit() { NSApp.terminate(nil) }
+    func windowDidBecomeKey(_ notification: Notification) {
+        guard notification.object as? NSWindow === window, !(window.firstResponder is NSTextView) || window.firstResponder === window else { return }
+        window.makeFirstResponder(composer)
+    }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { window.makeKeyAndOrderFront(nil); return true }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        if let notes = notesWindow, !notes.windowShouldClose(notes.window) { return .terminateCancel }
         if busy || runtimes.hasRunningProjects {
-            let alert = NSAlert(); alert.messageText = "Quit Notadot?"; alert.informativeText = "The active turn and app-managed project runtimes will stop. Your conversation and notes are saved. Closing the window keeps them running."
+            let alert = NSAlert(); alert.messageText = "Quit Notadot?"; alert.informativeText = "The active turn and the projects Notadot started will stop. Your conversation and notes are saved. Closing the window keeps them running."
             alert.addButton(withTitle: "Quit"); alert.addButton(withTitle: "Keep running")
             if alert.runModal() != .alertFirstButtonReturn { return .terminateCancel }
         }

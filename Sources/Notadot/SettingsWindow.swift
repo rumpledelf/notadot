@@ -22,123 +22,111 @@ func pin(_ view: NSView, in parent: NSView, inset: CGFloat = 16) {
 
 final class SettingsWindow: NSObject, NSWindowDelegate {
     let store: Store
-    var saved: (() -> Void)?
     let window: NSWindow
-    let titleField: NSTextField, root: NSTextField, notes: NSTextField, editor: NSTextField, codex: NSTextField, model: NSTextField
-    let screen = NSButton(checkboxWithTitle: "Allow screen viewing (asks before each capture)", target: nil, action: nil)
-    let clipboard = NSButton(checkboxWithTitle: "Allow clipboard tools (asks before each use)", target: nil, action: nil)
-    let projectPicker = NSPopUpButton(frame: .zero, pullsDown: false)
-    let projectName = field(), projectPath = field(), projectPort = field(), projectStart = field(), projectStop = field()
-    var projects: [Project]
-    var selected = -1
-    init(store: Store) {
-        self.store = store; let s = store.settings; projects = s.projects
-        titleField = field(s.title); root = field(s.root); notes = field(s.notes); editor = field(s.editor, placeholder: "Default Markdown app, or e.g. TextEdit")
-        codex = field(s.codex); model = field(s.model, placeholder: "Empty uses your Codex default")
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 780), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+    var saved: ((_ codexChanged: Bool) -> Void)?
+    var newSession: (() -> Void)?
+    private let name: NSTextField
+    private let editor = NSPopUpButton(), model = NSPopUpButton(), codex = NSPopUpButton()
+    private let codexNote = label(""), error = label("")
+    private var codexChoice: String
+    static let editors: [(name: String, bundle: String)] = [("BBEdit", "com.barebones.bbedit"), ("Visual Studio Code", "com.microsoft.VSCode"), ("Sublime Text", "com.sublimetext.4"), ("Zed", "dev.zed.Zed"), ("Nova", "com.panic.Nova"), ("CotEditor", "com.coteditor.CotEditor"), ("Typora", "abnerworks.Typora"), ("Obsidian", "md.obsidian"), ("MacDown", "com.uranusjr.macdown")]
+
+    init(store: Store, models: (@escaping ([(id: String, name: String)]) -> Void) -> Void) {
+        self.store = store; let s = store.settings; codexChoice = s.codex
+        name = field(s.title)
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 330), styleMask: [.titled, .closable], backing: .buffered, defer: false)
         super.init()
-        window.title = "Notadot Settings"; window.isReleasedWhenClosed = false; window.delegate = self
-        window.contentMinSize = NSSize(width: 680, height: 600)
-        screen.state = s.screenEnabled ? .on : .off; clipboard.state = s.clipboardEnabled ? .on : .off
-        projectPicker.target = self; projectPicker.action = #selector(selectProject)
-        let pairs: [(String, NSTextField)] = [("Window name", titleField), ("Project root", root), ("Persistent notes file", notes), ("External notes editor", editor), ("Codex executable", codex), ("Model", model)]
-        var views: [NSView] = [label("Your assistant, your settings", bold: true)]
-        for (name, f) in pairs { views.append(label(name)); views.append(f) }
-        views += [screen, clipboard, label("Projects · fixed ports only", bold: true), row(projectPicker, button("Add", self, #selector(addProject)), button("Remove", self, #selector(removeProject)))]
-        for (name, f) in [("Name", projectName), ("Folder", projectPath), ("Port", projectPort), ("Start command · use {port}", projectStart), ("Optional stop command", projectStop)] {
-            views.append(label(name)); views.append(f)
-        }
-        views.append(label("Example: npm run dev -- --port {port} --strictPort\nPORT is also set. The app stops a runtime if it detects another listening port. Changes take effect after Save; reconnect applies Codex settings."))
-        let content = column(views)
-        let scroll = NSScrollView(); scroll.hasVerticalScroller = true
-        let doc = FlippedView(); doc.translatesAutoresizingMaskIntoConstraints = false; scroll.documentView = doc
-        content.translatesAutoresizingMaskIntoConstraints = false; doc.addSubview(content)
-        NSLayoutConstraint.activate([doc.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor), content.leadingAnchor.constraint(equalTo: doc.leadingAnchor, constant: 20), content.trailingAnchor.constraint(equalTo: doc.trailingAnchor, constant: -20), content.topAnchor.constraint(equalTo: doc.topAnchor, constant: 20), content.bottomAnchor.constraint(equalTo: doc.bottomAnchor, constant: -20)])
-        for view in views where view is NSTextField && (view as? NSTextField)?.isEditable == true { view.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true }
-        let body = column([scroll, row(button("Save", self, #selector(save)), button("Cancel", self, #selector(cancel)))])
-        pin(body, in: window.contentView!, inset: 12)
-        scroll.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true
-        scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 450).isActive = true
-        refreshPicker(); window.center()
+        window.title = "Settings"; window.isReleasedWhenClosed = false; window.delegate = self
+
+        // Notes editor: installed editors by name, plus whatever was chosen before.
+        editor.addItem(withTitle: "Default app for Markdown"); editor.lastItem?.representedObject = ""
+        var editorNames = ["TextEdit"] + Self.editors.filter { NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0.bundle) != nil }.map(\.name)
+        if !s.editor.isEmpty && !editorNames.contains(s.editor) { editorNames.append(s.editor) }
+        for n in editorNames { editor.addItem(withTitle: n); editor.lastItem?.representedObject = n }
+        editor.menu?.addItem(.separator()); editor.addItem(withTitle: "Choose App…"); editor.lastItem?.representedObject = "choose"
+        editor.selectItem(at: max(0, editor.indexOfItem(withRepresentedObject: s.editor)))
+        editor.target = self; editor.action = #selector(editorPicked)
+
+        // Model: the connected Codex lists what's available; until then just the current choice.
+        model.addItem(withTitle: "Codex default"); model.lastItem?.representedObject = ""
+        if !s.model.isEmpty { model.addItem(withTitle: s.model); model.lastItem?.representedObject = s.model; model.selectItem(at: 1) }
+        models { [weak self] list in DispatchQueue.main.async { self?.fillModels(list) } }
+
+        codex.target = self; codex.action = #selector(codexPicked); fillCodex()
+        codexNote.font = .systemFont(ofSize: 11); codexNote.textColor = .secondaryLabelColor
+        error.textColor = .systemRed; error.isHidden = true
+        for p in [editor, model, codex] { p.widthAnchor.constraint(equalToConstant: 280).isActive = true }
+        name.widthAnchor.constraint(equalToConstant: 240).isActive = true
+
+        let newSessionButton = button("New Session…", self, #selector(startNewSession))
+        let sessionNote = label("Archives this conversation and starts a fresh one. Notes carry over."); sessionNote.font = .systemFont(ofSize: 11); sessionNote.textColor = .secondaryLabelColor
+        let grid = NSGridView(views: [
+            [right("Name"), name],
+            [right("Notes editor"), editor],
+            [right("Model"), model],
+            [right("Codex"), column([codex, codexNote])],
+            [right("Session"), column([newSessionButton, sessionNote])],
+        ])
+        grid.rowSpacing = 14; grid.columnSpacing = 12; grid.column(at: 0).xPlacement = .trailing; grid.rowAlignment = .firstBaseline
+        let cancel = button("Cancel", self, #selector(cancel)); cancel.keyEquivalent = "\u{1b}"
+        let save = button("Save", self, #selector(save)); save.keyEquivalent = "\r"
+        let gap = NSView(); gap.setContentHuggingPriority(.init(1), for: .horizontal)
+        let buttons = row(gap, cancel, save)
+        let filler = NSView(); filler.setContentHuggingPriority(.init(1), for: .vertical)
+        let stack = column([grid, error, filler, buttons])
+        pin(stack, in: window.contentView!, inset: 24)
+        buttons.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        window.center()
     }
+    private func right(_ text: String) -> NSTextField { let l = label(text); l.alignment = .right; return l }
     func show() { window.makeKeyAndOrderFront(nil) }
-    private func commitProject() {
-        guard selected >= 0 && selected < projects.count else { return }
-        projects[selected].name = projectName.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        projects[selected].path = (projectPath.stringValue as NSString).expandingTildeInPath
-        projects[selected].port = Int(projectPort.stringValue) ?? 0
-        projects[selected].start = projectStart.stringValue; projects[selected].stop = projectStop.stringValue
+    private func fillModels(_ list: [(id: String, name: String)]) {
+        let current = model.selectedItem?.representedObject as? String ?? ""
+        model.removeAllItems(); model.addItem(withTitle: "Codex default"); model.lastItem?.representedObject = ""
+        var ids = list.map(\.id)
+        for m in list { model.addItem(withTitle: m.name); model.lastItem?.representedObject = m.id }
+        if !current.isEmpty && !ids.contains(current) { model.addItem(withTitle: current); model.lastItem?.representedObject = current; ids.append(current) }
+        model.selectItem(at: max(0, model.indexOfItem(withRepresentedObject: current)))
     }
-    private func refreshPicker() {
-        projectPicker.removeAllItems(); projectPicker.addItems(withTitles: projects.map { $0.name.isEmpty ? "Untitled project" : $0.name })
-        selected = projects.isEmpty ? -1 : min(max(selected, 0), projects.count - 1)
-        if selected >= 0 { projectPicker.selectItem(at: selected) }
-        loadProject()
+    private func fillCodex() {
+        codex.removeAllItems()
+        let found = Store.codexPath("")
+        codex.addItem(withTitle: "Automatic"); codex.lastItem?.representedObject = ""
+        if !codexChoice.isEmpty { codex.addItem(withTitle: codexChoice); codex.lastItem?.representedObject = codexChoice }
+        codex.menu?.addItem(.separator()); codex.addItem(withTitle: "Choose Executable…"); codex.lastItem?.representedObject = "choose"
+        codex.selectItem(at: codexChoice.isEmpty ? 0 : 1)
+        let path = Store.codexPath(codexChoice)
+        codexNote.stringValue = path.map { "Using \($0)" } ?? (codexChoice.isEmpty ? (found == nil ? "Not found. Install Codex, or choose it." : "") : "Not found at that path.")
     }
-    private func loadProject() {
-        let enabled = selected >= 0
-        [projectName, projectPath, projectPort, projectStart, projectStop].forEach { $0.isEnabled = enabled }
-        guard enabled else { [projectName, projectPath, projectPort, projectStart, projectStop].forEach { $0.stringValue = "" }; return }
-        let p = projects[selected]; projectName.stringValue = p.name; projectPath.stringValue = p.path; projectPort.stringValue = String(p.port); projectStart.stringValue = p.start; projectStop.stringValue = p.stop
+    @objc private func editorPicked() {
+        guard editor.selectedItem?.representedObject as? String == "choose" else { return }
+        let panel = NSOpenPanel(); panel.allowedFileTypes = ["app"]; panel.directoryURL = URL(fileURLWithPath: "/Applications")
+        if panel.runModal() == .OK, let url = panel.url {
+            let appName = url.deletingPathExtension().lastPathComponent
+            if editor.indexOfItem(withRepresentedObject: appName) < 0 { editor.insertItem(withTitle: appName, at: editor.numberOfItems - 2); editor.item(at: editor.numberOfItems - 3)?.representedObject = appName }
+            editor.selectItem(at: editor.indexOfItem(withRepresentedObject: appName))
+        } else { editor.selectItem(at: max(0, editor.indexOfItem(withRepresentedObject: store.settings.editor))) }
     }
-    @objc private func selectProject() { commitProject(); selected = projectPicker.indexOfSelectedItem; loadProject() }
-    @objc private func addProject() {
-        commitProject(); projects.append(Project(name: "New project", path: root.stringValue, port: 0, start: "npm run dev -- --port {port} --strictPort")); selected = projects.count - 1; refreshPicker()
+    @objc private func codexPicked() {
+        guard codex.selectedItem?.representedObject as? String == "choose" else { codexChoice = codex.selectedItem?.representedObject as? String ?? ""; fillCodex(); return }
+        let panel = NSOpenPanel(); panel.canChooseFiles = true; panel.treatsFilePackagesAsDirectories = true
+        if panel.runModal() == .OK, let url = panel.url { codexChoice = url.path }
+        fillCodex()
     }
-    @objc private func removeProject() { guard selected >= 0 else { return }; projects.remove(at: selected); selected = -1; refreshPicker() }
+    @objc private func startNewSession() { window.close(); newSession?() }
     @objc private func cancel() { window.close() }
     @objc private func save() {
-        commitProject()
         var s = store.settings
-        s.title = titleField.stringValue; s.root = (root.stringValue as NSString).expandingTildeInPath; s.notes = (notes.stringValue as NSString).expandingTildeInPath
-        s.editor = editor.stringValue; s.codex = (codex.stringValue as NSString).expandingTildeInPath; s.model = model.stringValue
-        s.screenEnabled = screen.state == .on; s.clipboardEnabled = clipboard.state == .on; s.projects = projects
+        s.title = name.stringValue.trimmingCharacters(in: .whitespaces)
+        s.editor = editor.selectedItem?.representedObject as? String ?? ""
+        s.model = model.selectedItem?.representedObject as? String ?? ""
+        s.codex = codexChoice
         do {
             try store.validate(s)
-            for p in s.projects where !p.start.contains("{port}") { throw AppError.message("\(p.name)'s start command must contain {port}.") }
-            if !FileManager.default.fileExists(atPath: s.notes) {
-                let existing = try String(contentsOfFile: store.settings.notes, encoding: .utf8)
-                try existing.write(toFile: s.notes, atomically: true, encoding: .utf8)
-            }
+            let codexChanged = s.codex != store.settings.codex || s.model != store.settings.model
             let old = store.settings; store.settings = s
             do { try store.saveSettings() } catch { store.settings = old; throw error }
-            saved?(); window.close()
-        } catch { let alert = NSAlert(error: error); alert.runModal() }
-    }
-}
-
-final class NotesWindow: NSObject, NSWindowDelegate {
-    let window: NSWindow
-    let text = NSTextView()
-    let path: String
-    private var original: String
-    init(path: String) throws {
-        self.path = path; original = try String(contentsOfFile: path, encoding: .utf8)
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 560), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
-        super.init(); window.title = "Persistent notes"; window.isReleasedWhenClosed = false
-        window.delegate = self
-        window.contentMinSize = NSSize(width: 560, height: 450)
-        let scroll = NSScrollView(); scroll.hasVerticalScroller = true; scroll.documentView = text
-        text.string = original; text.isRichText = false; text.font = .monospacedSystemFont(ofSize: 13, weight: .regular); text.autoresizingMask = [.width]; text.isVerticallyResizable = true; text.textContainer?.widthTracksTextView = true
-        let stack = column([label(path), scroll, row(button("Save", self, #selector(save)), button("Reload", self, #selector(reload)))])
-        pin(stack, in: window.contentView!); scroll.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
-        scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 350).isActive = true; window.center()
-    }
-    @objc private func reload() {
-        do { original = try String(contentsOfFile: path, encoding: .utf8); text.string = original } catch { NSAlert(error: error).runModal() }
-    }
-    @objc private func save() { if saveContents() { window.close() } }
-    private func saveContents() -> Bool {
-        do {
-            guard try String(contentsOfFile: path, encoding: .utf8) == original else { throw AppError.message("The notes changed on disk. Copy your edits, then Reload to avoid overwriting the assistant's changes.") }
-            try text.string.write(toFile: path, atomically: true, encoding: .utf8); original = text.string; return true
-        } catch { NSAlert(error: error).runModal(); return false }
-    }
-    func windowShouldClose(_ sender: NSWindow) -> Bool {
-        guard text.string != original else { return true }
-        let alert = NSAlert(); alert.messageText = "Save your notes before closing?"
-        alert.addButton(withTitle: "Save"); alert.addButton(withTitle: "Discard"); alert.addButton(withTitle: "Cancel")
-        let result = alert.runModal()
-        return result == .alertFirstButtonReturn ? saveContents() : result == .alertSecondButtonReturn
+            window.close(); saved?(codexChanged)
+        } catch { self.error.stringValue = error.localizedDescription; self.error.isHidden = false }
     }
 }

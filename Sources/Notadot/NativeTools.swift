@@ -5,6 +5,7 @@ final class NativeTools {
     let store: Store
     let runtimes: RuntimeManager
     var changed: (() -> Void)?
+    var interactive = true // The self-test runs without dialogs.
     init(store: Store, runtimes: RuntimeManager) { self.store = store; self.runtimes = runtimes }
     static var definitions: [[String: Any]] {
         let actions = ["notes_read", "notes_append", "clipboard_read", "clipboard_write", "screen_view", "projects_list", "project_start", "project_stop"]
@@ -22,29 +23,38 @@ final class NativeTools {
             try (old + "\n" + text + "\n").write(toFile: store.settings.notes, atomically: true, encoding: .utf8)
             result = "Notes saved."
         case "clipboard_read", "clipboard_write":
-            guard store.settings.clipboardEnabled else { throw AppError.message("Clipboard tools are disabled in Settings.") }
-            try confirm(action == "clipboard_read" ? "Read your clipboard?" : "Replace your clipboard?", action == "clipboard_read" ? "The clipboard text will be sent to Codex." : String(text.prefix(1500)))
+            try allow(.clipboard, action == "clipboard_read" ? "Let Codex read your clipboard?" : "Let Codex replace your clipboard?", action == "clipboard_read" ? "The clipboard text is sent to Codex." : String(text.prefix(1500)))
             if action == "clipboard_read" { result = NSPasteboard.general.string(forType: .string) ?? "Clipboard has no text." }
             else { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string); result = "Clipboard updated." }
         case "screen_view":
-            guard store.settings.screenEnabled else { throw AppError.message("Screen viewing is disabled in Settings.") }
-            try confirm("Share your screen with Codex?", "A screenshot of the main display will be sent to the model for this request.")
+            try allow(.screen, "Let Codex see your screen?", "A screenshot of the main display is sent to the model for this request.")
             return [["type": "inputImage", "imageUrl": try screenshot()]]
         case "projects_list":
-            let rows: [[String: Any]] = store.settings.projects.map { ["name": $0.name, "path": $0.path, "port": $0.port, "status": runtimes.status($0)] }
+            let rows: [[String: Any]] = store.settings.projects.map { ["name": $0.name, "path": $0.path, "port": $0.port, "runs": $0.start, "open": $0.openURL?.absoluteString ?? "", "status": runtimes.status($0).text] }
             let data = try JSONSerialization.data(withJSONObject: rows, options: [.prettyPrinted, .sortedKeys]); result = String(data: data, encoding: .utf8) ?? "[]"
         case "project_start", "project_stop":
             guard let p = store.settings.projects.first(where: { $0.name == args["project"] as? String }) else { throw AppError.message("Unknown project. Use projects_list first.") }
             if action == "project_start" { try runtimes.start(p) } else { try runtimes.stop(p) }
-            result = runtimes.status(p); changed?()
+            result = runtimes.status(p).text; changed?()
         default: throw AppError.message("Unknown native action: \(action)")
         }
         return [["type": "inputText", "text": result]]
     }
-    func confirm(_ title: String, _ detail: String) throws {
+    enum Permission { case screen, clipboard }
+    /// Asks the first time, offering "Always allow". Once always-allowed, it no longer asks.
+    func allow(_ kind: Permission, _ title: String, _ detail: String) throws {
+        let always = kind == .screen ? store.settings.screenEnabled : store.settings.clipboardEnabled
+        if always { return }
+        guard interactive else { throw AppError.message("Not allowed yet: the user hasn't been asked.") }
         let alert = NSAlert(); alert.messageText = title; alert.informativeText = detail
-        alert.addButton(withTitle: "Allow once"); alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { throw AppError.message("User declined.") }
+        alert.addButton(withTitle: "Allow Once"); alert.addButton(withTitle: "Don't Allow"); alert.addButton(withTitle: "Always Allow")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: return
+        case .alertThirdButtonReturn:
+            if kind == .screen { store.settings.screenEnabled = true } else { store.settings.clipboardEnabled = true }
+            try? store.saveSettings()
+        default: throw AppError.message("User declined.")
+        }
     }
     func screenshot() throws -> String {
         guard CGPreflightScreenCaptureAccess() else {
