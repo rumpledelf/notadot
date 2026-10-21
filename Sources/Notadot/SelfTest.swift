@@ -78,6 +78,35 @@ func selfTest() throws {
     var plannerDenied = false
     tools.performAsync(["action": "reminder_lists"]) { result in if case .failure = result { plannerDenied = true } }
     try check(plannerDenied, "Noninteractive tests cannot access real reminders or calendar accounts")
+    let eventDraft = CalendarDraft(title: "Review", start: ordinary, end: ordinary.addingTimeInterval(3600), calendarID: "fixture", calendarName: "Work", source: "iCloud", location: "Desk", notes: "Keep these notes")
+    let changedDraft = try eventDraft.updating(["title": "Project review", "location": "Office"])
+    try check(changedDraft.title == "Project review" && changedDraft.notes == eventDraft.notes && changedDraft.start == eventDraft.start && eventDraft.location == "Desk", "Calendar drafts preserve unchanged fields and leave the original untouched")
+    try check(changedDraft.preview.contains("Project review") && changedDraft.preview.contains("Office") && changedDraft.preview.contains("iCloud"), "Calendar confirmations describe the proposed title, calendar, and location")
+    for action in CalendarWriter.actions {
+        var written = false
+        do {
+            try CalendarWriteGate.commit(confirm: { false }, revalidate: {}, write: { written = true })
+            throw AppError.message("FAIL: declined calendar write ran")
+        } catch AppError.message(let text) where text.contains("User declined") { }
+        try check(!written, "Declining \(action) prevents the database operation")
+    }
+    var writeCount = 0
+    try CalendarWriteGate.commit(confirm: { true }, revalidate: {}, write: { writeCount += 1 })
+    try check(writeCount == 1, "Calendar approval authorizes exactly one operation")
+    do {
+        try CalendarWriteGate.commit(confirm: { true }, revalidate: { throw AppError.message("Event changed during review") }, write: { writeCount += 1 })
+        throw AppError.message("FAIL: stale calendar approval accepted")
+    } catch AppError.message(let text) where text.contains("changed during review") { }
+    try check(writeCount == 1, "An event changed during review cannot be written using stale approval")
+    do { try CalendarWriter.validate(["action": "calendar_delete", "event": "series-id"]); throw AppError.message("FAIL: ambiguous occurrence accepted") }
+    catch AppError.message(let text) where text.contains("occurrence") { print("PASS: Calendar deletions require the exact occurrence, not just a series ID") }
+    do { _ = try eventDraft.updating(["end": "2026-10-21T00:00:00Z"]); throw AppError.message("FAIL: invalid event range accepted") }
+    catch AppError.message(let text) where text.contains("end must") { print("PASS: Calendar writes reject reversed times") }
+    do { _ = try eventDraft.updating(["allDay": true]); throw AppError.message("FAIL: non-midnight all-day event accepted") }
+    catch AppError.message(let text) where text.contains("midnight") { print("PASS: All-day events require valid midnight boundaries") }
+    var calendarDenied = false
+    tools.performAsync(["action": "calendar_add", "title": "Do not save", "start": "2026-10-22T15:00:00+11:00", "end": "2026-10-22T16:00:00+11:00"]) { result in if case .failure = result { calendarDenied = true } }
+    try check(calendarDenied, "Noninteractive checks cannot create real calendar events")
     do { _ = try tools.perform(["action": "clipboard_read"]); throw AppError.message("FAIL: disabled clipboard was accessible") }
     catch AppError.message(let text) where text.contains("Not allowed") { print("PASS: Clipboard needs permission") }
     do { _ = try tools.perform(["action": "screen_view"]); throw AppError.message("FAIL: disabled screen was accessible") }
