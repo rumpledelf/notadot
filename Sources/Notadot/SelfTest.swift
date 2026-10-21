@@ -46,6 +46,19 @@ func selfTest() throws {
     try check(disk.jobs.first?.latestReply == "Private job result" && disk.jobs.first?.state == .done && !disk.session.messages.contains(where: { $0.text.contains("Private job result") }), "Job results survive reload without entering the housekeeper transcript")
     try jobs.archive(job.id)
     try check(try Store(directory: directory).jobs.first?.archived == true, "Finished jobs can be archived persistently")
+    let fractional = try PlannerDates.parse("2026-10-22T15:00:00.123+11:00")
+    let ordinary = try PlannerDates.parse("2026-10-22T04:00:00Z")
+    try check(abs(fractional.timeIntervalSince(ordinary) - 0.123) < 0.01, "Reminder timestamps preserve timezone offsets and fractional seconds")
+    _ = try PlannerDates.parse("2026-10-22")
+    do { _ = try PlannerDates.parse("2026-02-30"); throw AppError.message("FAIL: invalid calendar date accepted") }
+    catch AppError.message(let text) where text.contains("ISO") { print("PASS: Invalid reminder dates are rejected") }
+    do { _ = try PlannerDates.due(["title": "Undated"]); throw AppError.message("FAIL: undated alert accepted") }
+    catch AppError.message(let text) where text.contains("due date") { print("PASS: Reminder alerts require a real due date") }
+    do { _ = try PlannerDates.range(["start": "2026-10-23", "end": "2026-10-22"], required: true); throw AppError.message("FAIL: reversed range accepted") }
+    catch AppError.message(let text) where text.contains("end must") { print("PASS: Reversed calendar ranges are rejected") }
+    var plannerDenied = false
+    tools.performAsync(["action": "reminder_lists"]) { result in if case .failure = result { plannerDenied = true } }
+    try check(plannerDenied, "Noninteractive tests cannot access real reminders or calendar accounts")
     do { _ = try tools.perform(["action": "clipboard_read"]); throw AppError.message("FAIL: disabled clipboard was accessible") }
     catch AppError.message(let text) where text.contains("Not allowed") { print("PASS: Clipboard needs permission") }
     do { _ = try tools.perform(["action": "screen_view"]); throw AppError.message("FAIL: disabled screen was accessible") }

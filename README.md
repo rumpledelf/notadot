@@ -44,6 +44,16 @@ When a job finishes or asks for input, Notadot posts a macOS notification and a 
 
 **Existing sessions:** this installed Codex version persists native-tool definitions from thread creation and cannot replace them on resume. Notadot shows a notice when a saved session predates its current tools. Use **Settings → New Session** to enable new actions; the old transcript is archived and notes carry over. It never silently discards a conversation to upgrade tools.
 
+## Reminders and calendar · testing checkpoint
+
+The housekeeper now has EventKit actions: `reminder_lists`, `reminders_list`, `reminder_add`, `reminder_complete`, and `calendar_events`. macOS requests Reminders or Calendar permission on first use, independently. Calendar actions are read-only in code. Reminder lists can be read by ID or unique name, incomplete reminders can be filtered by due range, and reads return at most 100 items (30 by default).
+
+New reminders require a due date and get a real EventKit alarm at that instant. Notadot selects a writable iCloud reminder list, preferring your default when it is in iCloud, and refuses to silently create a local-only reminder. You can choose an iCloud list explicitly. Sync and iPhone delivery still depend on iCloud being enabled on both devices and on your notification settings. Date-only inputs mean local midnight; give an explicit time and timezone for timed alerts. Calendar queries require a start/end range of at most a year; keep it narrow.
+
+After upgrading an existing session, use **Settings → New Session** to register the expanded native tool. Try “List my reminder lists,” then a dated test reminder with an exact time, then list and complete it. Check that it arrives in Reminders on your iPhone. Ask for tomorrow's calendar events to test Calendar permission separately. Permission denial is reported in the conversation; access can be re-enabled in System Preferences → Security & Privacy → Privacy.
+
+This is the Part A testing checkpoint from `BRIEF-reminders-checkins.md`. Email and proactive check-ins are deferred until that test passes. This build does not schedule unattended inference or missed check-ins. Automated tests validate dates and range bounds without reading or changing real reminder/calendar accounts.
+
 ## Storage
 
 App data lives in `~/Library/Application Support/Notadot/`:

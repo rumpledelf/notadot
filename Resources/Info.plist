@@ -10,4 +10,6 @@
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>LSMinimumSystemVersion</key><string>11.0</string>
 <key>NSHighResolutionCapable</key><true/>
+<key>NSRemindersUsageDescription</key><string>Notadot reads your reminders and creates dated reminders with alerts when you ask.</string>
+<key>NSCalendarsUsageDescription</key><string>Notadot reads calendar events you ask about. It does not create or change events.</string>
 </dict></plist>

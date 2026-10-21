@@ -4,6 +4,7 @@ import UserNotifications
 final class Notifications: NSObject, UNUserNotificationCenterDelegate {
     var openJob: ((String) -> Void)?
     private var requested = false
+    override init() { super.init(); UNUserNotificationCenter.current().delegate = self }
     func show(_ title: String, _ text: String, job: String) {
         let center = UNUserNotificationCenter.current(); center.delegate = self
         func deliver() {

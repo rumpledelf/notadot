@@ -23,9 +23,10 @@ final class Jobs {
     var persistenceError: ((Error) -> Void)?
     private var loaded = Set<String>()
     private var loading = Set<String>()
+    private var liveThreads: [String: String] = [:]
     init(store: Store, codex: Codex) { self.store = store; self.codex = codex }
-    var hasWorking: Bool { store.jobs.contains { $0.state == .working } }
-    func job(_ id: String) -> Job? { store.jobs.first { $0.id == id || $0.threadID == id } }
+    var hasWorking: Bool { store.jobs.contains { $0.state == .working || $0.turnID != nil } }
+    func job(_ id: String) -> Job? { store.jobs.first { $0.id == id || $0.threadID == id || liveThreads[$0.id] == id } }
     private func index(_ id: String) -> Int? { store.jobs.firstIndex { $0.id == id } }
     func save() { do { try store.saveJobs() } catch { persistenceError?(error) }; changed?() }
     static func folder(_ raw: String, projects: [Project]) throws -> String {
@@ -96,7 +97,7 @@ final class Jobs {
         guard let job = job(id), !loading.contains(id) else { done(.failure(AppError.message("Job is reconnecting; try again shortly."))); return }
         if loaded.contains(id) { done(.success(())); return }
         loading.insert(id)
-        var params: [String: Any] = ["cwd": job.folder, "runtimeWorkspaceRoots": [job.folder], "model": job.model, "developerInstructions": "Work on the user's approved job in this project. Ask the user when a decision or approval is needed. When waiting for feedback, use request_user_input so the app knows you are waiting. Do not launch more jobs, access reminders/email, or act as the housekeeper."]
+        var params: [String: Any] = ["cwd": job.folder, "runtimeWorkspaceRoots": [job.folder], "model": job.model, "sandbox": "workspace-write", "approvalPolicy": "on-request", "approvalsReviewer": "user", "developerInstructions": "Work on the user's approved job in this project. Ask the user when a decision or approval is needed. When waiting for feedback, use request_user_input so the app knows you are waiting. Do not launch more jobs, access reminders/email, or act as the housekeeper."]
         let method: String
         if let thread = job.threadID { params["threadId"] = thread; method = "thread/resume" }
         else {
@@ -108,7 +109,7 @@ final class Jobs {
             do {
                 let result = try result.get()
                 guard let thread = result["thread"] as? [String: Any], let threadID = thread["id"] as? String else { throw AppError.message("Codex returned no job thread ID.") }
-                self.store.jobs[i].threadID = threadID; self.store.jobs[i].turnID = nil
+                self.liveThreads[id] = threadID; self.store.jobs[i].turnID = nil
                 var active = false
                 for turn in thread["turns"] as? [[String: Any]] ?? [] {
                     for item in turn["items"] as? [[String: Any]] ?? [] where item["type"] as? String == "agentMessage" { self.agent(i, item) }
@@ -121,8 +122,9 @@ final class Jobs {
     }
     func send(_ id: String, _ text: String, attachment: String? = nil, done: @escaping (Result<Void, Error>) -> Void) {
         load(id) { [weak self] result in
-            guard let self = self, let i = self.index(id), let thread = self.store.jobs[i].threadID else { done(.failure(AppError.message("Job could not be loaded."))); return }
+            guard let self = self else { return }
             do { try result.get() } catch { done(.failure(error)); return }
+            guard let i = self.index(id), let thread = self.liveThreads[id] ?? self.store.jobs[i].threadID else { done(.failure(AppError.message("Job could not be loaded."))); return }
             var input: [[String: Any]] = [["type": "text", "text": text]]
             if let attachment = attachment { input.append(["type": "image", "url": attachment]) }
             var params: [String: Any] = ["threadId": thread, "input": input]
@@ -132,6 +134,7 @@ final class Jobs {
             self.codex.call(steer ? "turn/steer" : "turn/start", params) { result in
                 do {
                     let response = try result.get()
+                    self.store.jobs[i].threadID = thread
                     if let turn = response["turn"] as? [String: Any] { self.store.jobs[i].turnID = turn["id"] as? String }
                     self.save(); done(.success(()))
                 } catch { self.fail(id, error); done(.failure(error)) }
@@ -139,9 +142,9 @@ final class Jobs {
         }
     }
     func event(_ method: String, _ params: [String: Any]) -> Bool {
-        guard let thread = params["threadId"] as? String, let i = store.jobs.firstIndex(where: { $0.threadID == thread }) else { return false }
+        guard let thread = params["threadId"] as? String, let i = store.jobs.firstIndex(where: { $0.threadID == thread || liveThreads[$0.id] == thread }) else { return false }
         switch method {
-        case "turn/started": store.jobs[i].state = .working; store.jobs[i].turnID = (params["turn"] as? [String: Any])?["id"] as? String
+        case "turn/started": store.jobs[i].threadID = thread; store.jobs[i].state = .working; store.jobs[i].turnID = (params["turn"] as? [String: Any])?["id"] as? String
         case "item/agentMessage/delta":
             guard let id = params["itemId"] as? String, let delta = params["delta"] as? String else { return true }
             if let j = store.jobs[i].messages.firstIndex(where: { $0.itemID == id }) { store.jobs[i].messages[j].text += delta }
@@ -183,7 +186,7 @@ final class Jobs {
         codex.call("turn/interrupt", ["threadId": thread, "turnId": turn]) { [weak self] result in if case .failure(let error) = result { self?.fail(id, error) } }
     }
     func disconnected() {
-        loaded.removeAll(); loading.removeAll()
+        loaded.removeAll(); loading.removeAll(); liveThreads.removeAll()
         for i in store.jobs.indices where store.jobs[i].state == .working || store.jobs[i].turnID != nil { store.jobs[i].state = .waiting; store.jobs[i].turnID = nil }
         save()
     }
