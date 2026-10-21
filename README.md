@@ -16,6 +16,7 @@ The build script uses the installed Command Line Tools compiler and SDK, targets
 ## Using it
 
 - **Chat:** one long-running Codex session. Return sends and Shift-Return adds a line; while it's working, sending steers the current turn and `⌘.` stops it. Compact asks Codex to compact its context. Screen and clipboard sharing are in the composer's **+** menu.
+- Progress messages are marked **Working** while a turn runs, then collapse when its final answer arrives. Stable partial answers remain visible. The original items and their phases remain saved; reconnecting fills in phase metadata for older conversations. This applies to housekeeper and job chats.
 - **Notes:** `notes.md` works like AGENTS.md. Notadot includes it with your first message after every connect or compaction, and the assistant adds to it. **Notes** in the sidebar shows it formatted (read-only); the pencil opens it in your notes editor.
 - **Settings** (`⌘,`, or the cog bottom left): name, notes editor, model (listed by the connected Codex), Codex (automatic or a chosen executable), and New Session, which archives the conversation and starts fresh. Notes carry over.
 - **Permissions:** the first time the assistant wants the screen or clipboard, Notadot asks: Allow Once, Don't Allow, or Always Allow. Codex command and file approvals always ask.

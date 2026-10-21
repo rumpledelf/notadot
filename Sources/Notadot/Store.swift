@@ -59,6 +59,8 @@ struct Message: Codable {
     var role: String
     var text: String
     var itemID: String?
+    var phase: String?
+    var turnID: String?
 }
 struct Session: Codable {
     var threadID: String?
