@@ -77,6 +77,20 @@ stream_max_retries = 0
         time.sleep(0.5)
         client.call("turn/interrupt", {"threadId": thread, "turnId": turn["turn"]["id"]})
         print("PASS: offline turn with a notes block starts and can be interrupted without a live model")
+        models = client.call("model/list", {})["data"]
+        assert models, "No models listed by Codex"
+        job_model = models[0].get("model", models[0]["id"])
+        job_thread = client.call("thread/start", {"cwd": str(home), "model": job_model,
+                                 "dynamicTools": [], "config": {"features.multi_agent": False,
+                                                                 "apps._default.enabled": False}})["thread"]["id"]
+        job_turn = client.call("turn/start", {"threadId": job_thread,
+                              "input": [{"type": "text", "text": "Offline job fixture"}]})
+        time.sleep(0.5)
+        client.call("turn/interrupt", {"threadId": job_thread, "turnId": job_turn["turn"]["id"]})
+        print("PASS: separate job thread starts on a catalog model using the same connection")
+        client.call("thread/inject_items", {"threadId": thread, "items": [{"type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": "Job fixture finished. ID: test-job."}]}]})
+        print("PASS: short job report enters housekeeper context without starting a turn")
     finally:
         client.close()
     client = Client(home)
@@ -89,5 +103,16 @@ stream_max_retries = 0
         records = list(home.rglob("*.jsonl"))
         assert any('notadot' in record.read_text() for record in records), "Native tool was not persisted"
         print("PASS: native tool definition persists in the Codex session")
+        job_response = client.call("thread/resume", {"threadId": job_thread, "cwd": str(home), "model": job_model})
+        assert job_response["thread"]["id"] == job_thread
+        metadata = []
+        for record in records:
+            for line in record.read_text().splitlines():
+                item = json.loads(line)
+                if item.get("type") == "session_meta":
+                    metadata.append(item["payload"])
+        job_meta = next(m for m in metadata if m["id"] == job_thread)
+        assert not job_meta.get("dynamic_tools"), "Job inherited native tools"
+        print("PASS: job resumes after restart without housekeeper tools")
     finally:
         client.close()

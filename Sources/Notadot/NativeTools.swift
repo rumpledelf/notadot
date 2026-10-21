@@ -6,10 +6,19 @@ final class NativeTools {
     let runtimes: RuntimeManager
     var changed: (() -> Void)?
     var interactive = true // The self-test runs without dialogs.
+    var jobAction: (([String: Any], @escaping (Result<[[String: Any]], Error>) -> Void) -> Void)?
+    static let version = 1
     init(store: Store, runtimes: RuntimeManager) { self.store = store; self.runtimes = runtimes }
     static var definitions: [[String: Any]] {
-        let actions = ["notes_read", "notes_append", "clipboard_read", "clipboard_write", "screen_view", "projects_list", "project_start", "project_stop"]
-        return [["type": "function", "name": "notadot", "description": "Use the local Notadot app's persistent notes, clipboard, screenshot, and fixed-port project controls. Notes survive compaction and reboot. Screen/clipboard access require app settings and user confirmation. Project names must exactly match configured projects.", "inputSchema": ["type": "object", "properties": ["action": ["type": "string", "enum": actions], "text": ["type": "string"], "project": ["type": "string"]], "required": ["action"], "additionalProperties": false]]]
+        let actions = ["notes_read", "notes_append", "clipboard_read", "clipboard_write", "screen_view", "projects_list", "project_start", "project_stop", "job_start", "job_list", "job_result", "job_message"]
+        return [["type": "function", "name": "notadot", "description": "Local persistent notes, clipboard, screen, and fixed-port projects. Delegate substantial work using job_start(title, folder, task), which always asks the user before starting. job_list lists IDs/status, job_result(job) reads the latest reply, job_message(job, text) follows up. Jobs use the selected Jobs model; no full transcript is automatically added to your context.", "inputSchema": ["type": "object", "properties": ["action": ["type": "string", "enum": actions], "text": ["type": "string"], "project": ["type": "string"], "title": ["type": "string"], "folder": ["type": "string"], "task": ["type": "string"], "job": ["type": "string"]], "required": ["action"], "additionalProperties": false]]]
+    }
+    func performAsync(_ args: [String: Any], completion: @escaping (Result<[[String: Any]], Error>) -> Void) {
+        if (args["action"] as? String ?? "").hasPrefix("job_") {
+            guard let action = jobAction else { completion(.failure(AppError.message("Jobs are unavailable."))); return }
+            action(args, completion); return
+        }
+        do { completion(.success(try perform(args))) } catch { completion(.failure(error)) }
     }
     func perform(_ args: [String: Any]) throws -> [[String: Any]] {
         let action = args["action"] as? String ?? ""

@@ -4,8 +4,8 @@ func selfTest() throws {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent("notadot-test-" + UUID().uuidString)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: directory) }
-    func check(_ condition: @autoclosure () -> Bool, _ message: String) throws {
-        if !condition() { throw AppError.message("FAIL: " + message) }; print("PASS: " + message)
+    func check(_ condition: @autoclosure () throws -> Bool, _ message: String) throws {
+        if try !condition() { throw AppError.message("FAIL: " + message) }; print("PASS: " + message)
     }
     func wait(_ seconds: TimeInterval) {
         let end = Date().addingTimeInterval(seconds)
@@ -26,6 +26,26 @@ func selfTest() throws {
     _ = try tools.perform(["action": "notes_append", "text": "Remember the exact port."])
     let notes = try tools.perform(["action": "notes_read"])
     try check((notes.first?["text"] as? String)?.contains("Remember the exact port.") == true, "Native notes persist to disk")
+    let projectFolder = directory.appendingPathComponent("job-project"); let child = projectFolder.appendingPathComponent("Sources")
+    try FileManager.default.createDirectory(at: child, withIntermediateDirectories: true)
+    let jobProject = Project(name: "Jobs", path: projectFolder.path, port: 0, start: "")
+    try check(try Jobs.folder(child.path, projects: [jobProject]) == child.path, "Jobs accept subfolders of configured projects")
+    let sibling = directory.appendingPathComponent("job-project-other"); try FileManager.default.createDirectory(at: sibling, withIntermediateDirectories: true)
+    do { _ = try Jobs.folder(sibling.path, projects: [jobProject]); throw AppError.message("FAIL: sibling accepted") }
+    catch AppError.message(let text) where text.contains("configured") { print("PASS: Jobs reject sibling paths") }
+    let escape = child.appendingPathComponent("escape"); try FileManager.default.createSymbolicLink(at: escape, withDestinationURL: sibling)
+    do { _ = try Jobs.folder(escape.path, projects: [jobProject]); throw AppError.message("FAIL: symlink escape accepted") }
+    catch AppError.message(let text) where text.contains("configured") { print("PASS: Job folders cannot escape through symlinks") }
+    let jobs = Jobs(store: restored, codex: Codex())
+    var job = Job(title: "Fixture", folder: projectFolder.path, model: "fixture-model", task: "Local test")
+    job.threadID = "job-thread"; restored.jobs = [job]
+    try check(jobs.event("item/agentMessage/delta", ["threadId": "another-thread", "itemId": "reply", "delta": "wrong"]) == false, "Job routing ignores unrelated threads")
+    _ = jobs.event("item/agentMessage/delta", ["threadId": "job-thread", "itemId": "reply", "delta": "Private job result"])
+    _ = jobs.event("turn/completed", ["threadId": "job-thread", "turn": ["status": "completed"]])
+    let disk = try Store(directory: directory)
+    try check(disk.jobs.first?.latestReply == "Private job result" && disk.jobs.first?.state == .done && !disk.session.messages.contains(where: { $0.text.contains("Private job result") }), "Job results survive reload without entering the housekeeper transcript")
+    try jobs.archive(job.id)
+    try check(try Store(directory: directory).jobs.first?.archived == true, "Finished jobs can be archived persistently")
     do { _ = try tools.perform(["action": "clipboard_read"]); throw AppError.message("FAIL: disabled clipboard was accessible") }
     catch AppError.message(let text) where text.contains("Not allowed") { print("PASS: Clipboard needs permission") }
     do { _ = try tools.perform(["action": "screen_view"]); throw AppError.message("FAIL: disabled screen was accessible") }

@@ -34,6 +34,16 @@ Status dots: **green**, Notadot started it and it's running; **red**, Notadot's 
 
 Notadot supervises what it starts: it reports running only when the process group listens on the configured port, stops it if it opens a different port, and gives up if the port doesn't open within 30 seconds. It never stops a process it didn't start. When dev servers it didn't start are running, the sidebar offers **Ask Notadot to sort these out**, which hands the list to the chat; the assistant asks before stopping anything.
 
+## Jobs
+
+Choose a **Jobs model** in Settings from the connected Codex model list. Ask the housekeeper to delegate substantial development work: it calls `job_start` with a title, folder, and task (for example, “Read BRIEF-x.md and implement it”). Every start asks **Allow Once / Don't Allow**, showing the complete task, folder, and model. The folder must be a configured project or a subfolder; symlinks cannot escape that boundary.
+
+Jobs run as separate Codex threads on the same connection. They do not receive the Notadot native tool, so cannot start more jobs or use its personal-data actions. Command, file, and permission approvals still ask, with the job title in the dialog. The Jobs section shows working, waiting, done, and failed states. Select a job to read its conversation, send or steer it, or stop it. **Housekeeper chat** switches back; each conversation keeps its draft. Finished/stopped jobs can be archived.
+
+When a job finishes or asks for input, Notadot posts a macOS notification and a short status note in the housekeeper chat. Click the notification to open that job. Only the short note enters the housekeeper's context; `job_result` explicitly retrieves a job's latest reply. There is no automatic housekeeper inference turn. Jobs and their transcripts live in `jobs.json`; reopening resumes their threads without automatically rerunning interrupted work.
+
+**Existing sessions:** this installed Codex version persists native-tool definitions from thread creation and cannot replace them on resume. Notadot shows a notice when a saved session predates its current tools. Use **Settings → New Session** to enable new actions; the old transcript is archived and notes carry over. It never silently discards a conversation to upgrade tools.
+
 ## Storage
 
 App data lives in `~/Library/Application Support/Notadot/`:
@@ -41,6 +51,7 @@ App data lives in `~/Library/Application Support/Notadot/`:
 - `settings.json`: settings and projects.
 - `session-<time>.json`: conversations archived by New Session.
 - `session.json`: current thread ID and local conversation transcript, written atomically. Streamed replies are checkpointed about once per second.
+- `jobs.json`: delegated jobs, their model, folder, status, thread ID, and separate transcripts.
 - `notes.md`: persistent notes.
 - `runtime-<project-id>.log`: output from each launched project.
 

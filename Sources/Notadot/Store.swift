@@ -36,6 +36,7 @@ struct Settings: Codable {
     var editor = "" // macOS application name; empty uses the default Markdown application.
     var codex = "" // Empty finds codex at launch, so updates and reinstalls that move it need no setting change.
     var model = ""
+    var jobsModel = ""
     var screenEnabled = false
     var clipboardEnabled = false
     var projects: [Project] = []
@@ -48,6 +49,7 @@ struct Settings: Codable {
         editor = try c.decodeIfPresent(String.self, forKey: .editor) ?? d.editor
         codex = try c.decodeIfPresent(String.self, forKey: .codex) ?? d.codex
         model = try c.decodeIfPresent(String.self, forKey: .model) ?? d.model
+        jobsModel = try c.decodeIfPresent(String.self, forKey: .jobsModel) ?? d.jobsModel
         screenEnabled = try c.decodeIfPresent(Bool.self, forKey: .screenEnabled) ?? d.screenEnabled
         clipboardEnabled = try c.decodeIfPresent(Bool.self, forKey: .clipboardEnabled) ?? d.clipboardEnabled
         projects = try c.decodeIfPresent([Project].self, forKey: .projects) ?? d.projects
@@ -61,6 +63,8 @@ struct Message: Codable {
 struct Session: Codable {
     var threadID: String?
     var messages: [Message] = []
+    var toolVersion: Int? // nil identifies sessions created before versioned native tools.
+    var pendingJobNotes: [String]? // Short reports only; never a job transcript.
 }
 enum AppError: LocalizedError {
     case message(String)
@@ -70,6 +74,7 @@ final class Store {
     let directory: URL
     var settings: Settings
     var session: Session
+    var jobs: [Job]
     init(directory: URL? = nil) throws {
         self.directory = directory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Notadot")
         try FileManager.default.createDirectory(at: self.directory, withIntermediateDirectories: true)
@@ -77,6 +82,8 @@ final class Store {
         let sessionURL = self.directory.appendingPathComponent("session.json")
         settings = FileManager.default.fileExists(atPath: settingsURL.path) ? try JSONDecoder().decode(Settings.self, from: Data(contentsOf: settingsURL)) : Settings()
         session = FileManager.default.fileExists(atPath: sessionURL.path) ? try JSONDecoder().decode(Session.self, from: Data(contentsOf: sessionURL)) : Session()
+        let jobsURL = self.directory.appendingPathComponent("jobs.json")
+        jobs = FileManager.default.fileExists(atPath: jobsURL.path) ? try JSONDecoder().decode([Job].self, from: Data(contentsOf: jobsURL)) : []
         // Earlier builds saved this default explicitly; treat it as "find codex" so it follows reinstalls.
         if settings.codex == FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/codex").path { settings.codex = "" }
         if settings.notes.isEmpty { settings.notes = self.directory.appendingPathComponent("notes.md").path }
@@ -87,6 +94,7 @@ final class Store {
     }
     func saveSettings() throws { try write(settings, "settings.json") }
     func saveSession() throws { try write(session, "session.json") }
+    func saveJobs() throws { try write(jobs, "jobs.json") }
     private func write<T: Encodable>(_ value: T, _ filename: String) throws {
         let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         try encoder.encode(value).write(to: directory.appendingPathComponent(filename), options: .atomic)

@@ -26,7 +26,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
     var saved: ((_ codexChanged: Bool) -> Void)?
     var newSession: (() -> Void)?
     private let name: NSTextField
-    private let editor = NSPopUpButton(), model = NSPopUpButton(), codex = NSPopUpButton()
+    private let editor = NSPopUpButton(), model = NSPopUpButton(), jobsModel = NSPopUpButton(), codex = NSPopUpButton()
     private let codexNote = label(""), error = label("")
     private var codexChoice: String
     static let editors: [(name: String, bundle: String)] = [("BBEdit", "com.barebones.bbedit"), ("Visual Studio Code", "com.microsoft.VSCode"), ("Sublime Text", "com.sublimetext.4"), ("Zed", "dev.zed.Zed"), ("Nova", "com.panic.Nova"), ("CotEditor", "com.coteditor.CotEditor"), ("Typora", "abnerworks.Typora"), ("Obsidian", "md.obsidian"), ("MacDown", "com.uranusjr.macdown")]
@@ -34,7 +34,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
     init(store: Store, models: (@escaping ([(id: String, name: String)]) -> Void) -> Void) {
         self.store = store; let s = store.settings; codexChoice = s.codex
         name = field(s.title)
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 330), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 375), styleMask: [.titled, .closable], backing: .buffered, defer: false)
         super.init()
         window.title = "Settings"; window.isReleasedWhenClosed = false; window.delegate = self
 
@@ -50,12 +50,14 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
         // Model: the connected Codex lists what's available; until then just the current choice.
         model.addItem(withTitle: "Codex default"); model.lastItem?.representedObject = ""
         if !s.model.isEmpty { model.addItem(withTitle: s.model); model.lastItem?.representedObject = s.model; model.selectItem(at: 1) }
+        jobsModel.addItem(withTitle: "Choose a model for jobs…"); jobsModel.lastItem?.representedObject = ""
+        if !s.jobsModel.isEmpty { jobsModel.addItem(withTitle: s.jobsModel); jobsModel.lastItem?.representedObject = s.jobsModel; jobsModel.selectItem(at: 1) }
         models { [weak self] list in DispatchQueue.main.async { self?.fillModels(list) } }
 
         codex.target = self; codex.action = #selector(codexPicked); fillCodex()
         codexNote.font = .systemFont(ofSize: 11); codexNote.textColor = .secondaryLabelColor
         error.textColor = .systemRed; error.isHidden = true
-        for p in [editor, model, codex] { p.widthAnchor.constraint(equalToConstant: 280).isActive = true }
+        for p in [editor, model, jobsModel, codex] { p.widthAnchor.constraint(equalToConstant: 280).isActive = true }
         name.widthAnchor.constraint(equalToConstant: 240).isActive = true
 
         let newSessionButton = button("New Session…", self, #selector(startNewSession))
@@ -64,6 +66,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
             [right("Name"), name],
             [right("Notes editor"), editor],
             [right("Model"), model],
+            [right("Jobs model"), jobsModel],
             [right("Codex"), column([codex, codexNote])],
             [right("Session"), column([newSessionButton, sessionNote])],
         ])
@@ -81,6 +84,11 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
     private func right(_ text: String) -> NSTextField { let l = label(text); l.alignment = .right; return l }
     func show() { window.makeKeyAndOrderFront(nil) }
     private func fillModels(_ list: [(id: String, name: String)]) {
+        let selectedJob = jobsModel.selectedItem?.representedObject as? String ?? ""
+        jobsModel.removeAllItems(); jobsModel.addItem(withTitle: "Choose a model for jobs…"); jobsModel.lastItem?.representedObject = ""
+        for m in list { jobsModel.addItem(withTitle: m.name); jobsModel.lastItem?.representedObject = m.id }
+        if !selectedJob.isEmpty && !list.contains(where: { $0.id == selectedJob }) { jobsModel.addItem(withTitle: selectedJob); jobsModel.lastItem?.representedObject = selectedJob }
+        jobsModel.selectItem(at: max(0, jobsModel.indexOfItem(withRepresentedObject: selectedJob)))
         let current = model.selectedItem?.representedObject as? String ?? ""
         model.removeAllItems(); model.addItem(withTitle: "Codex default"); model.lastItem?.representedObject = ""
         var ids = list.map(\.id)
@@ -120,6 +128,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
         s.title = name.stringValue.trimmingCharacters(in: .whitespaces)
         s.editor = editor.selectedItem?.representedObject as? String ?? ""
         s.model = model.selectedItem?.representedObject as? String ?? ""
+        s.jobsModel = jobsModel.selectedItem?.representedObject as? String ?? ""
         s.codex = codexChoice
         do {
             try store.validate(s)
