@@ -82,7 +82,7 @@ Native checks exercise disk persistence, permission prompts, runtime start/stop,
 
 The protocol smoke test creates an isolated Codex home and deliberately unreachable local model provider. It checks initialization, tool registration, turn interruption, process restart, thread resume, and persisted native-tool definitions without sending a live model request. It requires Python 3 and the installed Codex binary.
 
-The UI smoke test opens the main window, notes view and Settings using temporary data and saves images of those app windows under `/tmp/notadot-ui-smoke/`. It does not connect to Codex or capture other apps.
+The UI smoke test opens the main window with a draft message, notes view and Settings using temporary data. It captures light mode, dark mode, and a switch back to light mode under `/tmp/notadot-ui-smoke/` (`light-`, `dark-`, and `light-again-` images). It does not connect to Codex or capture other apps.
 
 `python3 scripts/behavior-smoke.py` is a separate **live model check**. It uses the housekeeper model from app settings and the existing ChatGPT-plan Codex sign-in, so it uses model tokens. It sends four short acknowledgement/status messages in an ephemeral thread with synthetic notes and the app's actual instructions/tool definitions. Native tool requests are blocked and fail the test. Each turn must produce exactly one final answer, no commentary, and no tool calls. It never opens the real housekeeper conversation or reads the user's notes.
 

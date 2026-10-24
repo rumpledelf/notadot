@@ -18,9 +18,9 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTextViewDe
     let connDot = DotView(), connLabel = label("Disconnected"), versionLabel = label("")
     let projectList = NSStackView(), projectCount = label("")
     var projectRows: [String: ProjectRow] = [:], expandedID: String?
-    let othersBox = NSStackView(), othersLabel = label("")
+    let othersBox = SurfaceStackView(), othersLabel = label("")
     var otherServers: [OtherServer] = [], scanning = false, lastScan = Date.distantPast
-    let notesOverlay = NSStackView(), notesView = NSTextView()
+    let notesOverlay = SurfaceStackView(), notesView = NSTextView()
     var sendButton: NSButton!, stopButton: NSButton!, compactButton: NSButton!, notesButton: NSButton!
     var settingsWindow: SettingsWindow?, addSheet: AddProjectSheet?
     var timer: Timer?, renderTimer: Timer?, saveTimer: Timer?
@@ -59,6 +59,17 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTextViewDe
     }
     /// Each step waits a moment so the window server has drawn the change before it's captured.
     private func uiSmoke() {
+        if store.settings.projects.isEmpty {
+            store.settings.projects = [Project(name: "Example project", path: store.directory.path, port: 8001, start: "")]
+            refreshProjects()
+        }
+        if store.session.messages.isEmpty {
+            store.session.messages = [Message(role: "you", text: "Check the colours in both appearances."),
+                                      Message(role: "assistant", text: "The chat and **input** should stay readable.\n\nInline `code` and [links](https://example.com) follow the appearance too."),
+                                      Message(role: "tool", text: "Example tool output: secondary text should remain legible.")]
+            render()
+        }
+        composer.string = "Draft message — check text, selection and caret contrast."
         if store.jobs.isEmpty {
             var sample = Job(title: "Job preview", folder: store.directory.path, model: "Preview model", task: "UI fixture")
             sample.state = .done; sample.messages = [Message(role: "you", text: "Read the brief and report back."), Message(role: "assistant", text: "This job has its own conversation. Use Housekeeper chat to return.")]
@@ -66,23 +77,36 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTextViewDe
         }
         refreshJobs()
         if let first = store.settings.projects.first { toggleRow(first.id) }
-        let steps: [() throws -> Void] = [
-            { try self.captureSmoke(self.window, "main"); self.selectJob(self.store.jobs.first?.id) },
-            { try self.captureSmoke(self.window, "job"); self.selectJob(nil); self.toggleNotes() },
-            { try self.captureSmoke(self.window, "notes"); self.toggleNotes(); self.settings() },
-            {
-                guard let w = self.settingsWindow?.window else { throw AppError.message("Settings did not open") }
-                try self.captureSmoke(w, "settings"); w.close()
+        func captureAppearance(_ index: Int) {
+            let modes: [(String, NSAppearance.Name)] = [("light", .aqua), ("dark", .darkAqua), ("light-again", .aqua)]
+            guard index < modes.count else {
+                print("UI smoke test passed; images in \(self.store.directory.path)"); NSApp.terminate(nil); return
             }
-        ]
-        func next(_ index: Int) {
-            if index == steps.count { print("UI smoke test passed; images in \(store.directory.path)"); NSApp.terminate(nil); return }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                do { try steps[index](); next(index + 1) } catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
+            let (name, appearance) = modes[index]
+            self.window.appearance = NSAppearance(named: appearance)
+            let steps: [() throws -> Void] = [
+                { try self.captureSmoke(self.window, name + "-main"); self.selectJob(self.store.jobs.first?.id) },
+                { try self.captureSmoke(self.window, name + "-job"); self.selectJob(nil); self.toggleNotes() },
+                {
+                    try self.captureSmoke(self.window, name + "-notes"); self.toggleNotes(); self.settings()
+                    if let w = self.settingsWindow?.window { w.appearance = NSAppearance(named: appearance) }
+                },
+                {
+                    guard let w = self.settingsWindow?.window else { throw AppError.message("Settings did not open") }
+                    try self.captureSmoke(w, name + "-settings"); w.close()
+                }
+            ]
+            func next(_ step: Int) {
+                if step == steps.count { captureAppearance(index + 1); return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    do { try steps[step](); next(step + 1) } catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
+                }
             }
+            next(0)
         }
-        next(0)
+        captureAppearance(0)
     }
+
     private func captureSmoke(_ window: NSWindow, _ name: String) throws {
         guard let view = window.contentView else { throw AppError.message("Missing view") }
         view.layoutSubtreeIfNeeded(); window.displayIfNeeded()
@@ -152,7 +176,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTextViewDe
         othersBox.setViews([othersLabel, ask], in: .leading); othersBox.orientation = .vertical; othersBox.alignment = .leading; othersBox.spacing = 6
         othersBox.edgeInsets = NSEdgeInsets(top: 8, left: 10, bottom: 8, right: 10)
         othersBox.wantsLayer = true; othersBox.layer?.cornerRadius = 7; othersBox.layer?.borderWidth = 1
-        othersBox.layer?.borderColor = NSColor.systemOrange.withAlphaComponent(0.5).cgColor; othersBox.layer?.backgroundColor = NSColor.systemOrange.withAlphaComponent(0.08).cgColor
+        othersBox.surfaceBorderColor = NSColor.systemOrange.withAlphaComponent(0.5); othersBox.surfaceColor = NSColor.systemOrange.withAlphaComponent(0.08)
         othersBox.isHidden = true
 
         // Bottom left: connection, version, reconnect, settings.
@@ -173,8 +197,8 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTextViewDe
         return background
     }
     private func buildChat() -> NSView {
-        let container = NSView()
-        container.wantsLayer = true; container.layer?.backgroundColor = NSColor.textBackgroundColor.cgColor // One surface for header, transcript and composer.
+        let container = SurfaceView()
+        container.wantsLayer = true; container.surfaceColor = .textBackgroundColor // One surface for header, transcript and composer.
         titleLabel.stringValue = store.settings.title; titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
         status.font = .systemFont(ofSize: 12); status.textColor = .secondaryLabelColor; status.lineBreakMode = .byTruncatingTail; status.maximumNumberOfLines = 1
         status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -183,24 +207,28 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTextViewDe
         let header = NSStackView(views: [titleLabel, status, headSpacer, compactButton]); header.orientation = .horizontal; header.spacing = 8
         header.edgeInsets = NSEdgeInsets(top: 12, left: 20, bottom: 10, right: 16)
 
+        transcript.drawsBackground = false; transcript.textColor = .textColor
         transcript.isEditable = false; transcript.isSelectable = true; transcript.isRichText = true; transcript.textContainerInset = NSSize(width: 24, height: 18)
         transcript.autoresizingMask = [.width]; transcript.isVerticallyResizable = true; transcript.textContainer?.widthTracksTextView = true
-        let history = NSScrollView(); history.hasVerticalScroller = true; history.documentView = transcript; history.borderType = .noBorder
+        let history = NSScrollView(); history.hasVerticalScroller = true; history.documentView = transcript; history.borderType = .noBorder; history.drawsBackground = false
 
         // Notes view sits over the chat; read-only, editing happens in the external editor.
+        notesView.drawsBackground = false; notesView.textColor = .textColor
         notesView.isEditable = false; notesView.isSelectable = true; notesView.textContainerInset = NSSize(width: 32, height: 20)
         notesView.autoresizingMask = [.width]; notesView.isVerticallyResizable = true; notesView.textContainer?.widthTracksTextView = true
-        let notesScroll = NSScrollView(); notesScroll.hasVerticalScroller = true; notesScroll.documentView = notesView
+        let notesScroll = NSScrollView(); notesScroll.hasVerticalScroller = true; notesScroll.documentView = notesView; notesScroll.drawsBackground = false
         let notesTitle = label("Notes", bold: true); let notesHint = label("Read-only · the assistant reads and adds to these"); notesHint.textColor = .secondaryLabelColor; notesHint.font = .systemFont(ofSize: 12)
         let notesSpacer = NSView(); notesSpacer.setContentHuggingPriority(.init(1), for: .horizontal)
         let notesHead = NSStackView(views: [notesTitle, notesHint, notesSpacer, iconButton("pencil", "Edit notes in your editor", self, #selector(externalNotes)), iconButton("xmark", "Close notes", self, #selector(toggleNotes))])
         notesHead.orientation = .horizontal; notesHead.edgeInsets = NSEdgeInsets(top: 8, left: 20, bottom: 8, right: 12)
         notesOverlay.setViews([notesHead, notesScroll], in: .leading); notesOverlay.orientation = .vertical; notesOverlay.spacing = 0
-        notesOverlay.wantsLayer = true; notesOverlay.layer?.backgroundColor = NSColor.textBackgroundColor.cgColor; notesOverlay.isHidden = true
+        notesOverlay.wantsLayer = true; notesOverlay.surfaceColor = .textBackgroundColor; notesOverlay.isHidden = true
         for v in [notesHead, notesScroll] { v.widthAnchor.constraint(equalTo: notesOverlay.widthAnchor).isActive = true }
 
         // Composer: text across the full width, then a row of attach … stop, send underneath.
         composer.isRichText = false; composer.font = .systemFont(ofSize: 14); composer.delegate = self; composer.drawsBackground = false
+        composer.textColor = .textColor; composer.insertionPointColor = .textColor
+        composer.typingAttributes = [.font: NSFont.systemFont(ofSize: 14), .foregroundColor: NSColor.textColor]
         composer.textContainerInset = NSSize(width: 0, height: 2); composer.textContainer?.lineFragmentPadding = 0
         composer.autoresizingMask = [.width]; composer.isVerticallyResizable = true; composer.textContainer?.widthTracksTextView = true
         let input = NSScrollView(); input.hasVerticalScroller = true; input.autohidesScrollers = true; input.documentView = composer; input.drawsBackground = false
@@ -211,11 +239,11 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTextViewDe
         for b in [attach, stopButton!, sendButton!] { b.symbolConfiguration = .init(pointSize: 17, weight: .regular) }
         let buttonGap = NSView(); buttonGap.setContentHuggingPriority(.init(1), for: .horizontal)
         let buttons = NSStackView(views: [attach, buttonGap, stopButton, sendButton]); buttons.orientation = .horizontal; buttons.spacing = 4
-        let box = NSStackView(views: [input, buttons]); box.orientation = .vertical; box.spacing = 4
+        let box = SurfaceStackView(views: [input, buttons]); box.orientation = .vertical; box.spacing = 4
         box.edgeInsets = NSEdgeInsets(top: 10, left: 12, bottom: 6, right: 8)
         for v in [input, buttons] { v.widthAnchor.constraint(equalTo: box.widthAnchor, constant: -20).isActive = true }
-        box.wantsLayer = true; box.layer?.cornerRadius = 12; box.layer?.borderWidth = 1; box.layer?.borderColor = NSColor.separatorColor.cgColor
-        box.layer?.backgroundColor = NSColor.textBackgroundColor.cgColor
+        box.wantsLayer = true; box.layer?.cornerRadius = 12; box.layer?.borderWidth = 1; box.surfaceBorderColor = .separatorColor
+        box.surfaceColor = .textBackgroundColor
         let hint = label("↵ to send · ⇧↵ for a new line · Steer while working · ⌘. to stop"); hint.font = .systemFont(ofSize: 11); hint.textColor = .secondaryLabelColor
         let footer = NSStackView(views: [box, hint]); footer.orientation = .vertical; footer.alignment = .leading; footer.spacing = 5
         footer.edgeInsets = NSEdgeInsets(top: 8, left: 20, bottom: 14, right: 20)

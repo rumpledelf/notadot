@@ -38,7 +38,7 @@ final class ClickArea: NSStackView {
 
 /// One project in the sidebar, laid out like fern-layout's section rows: status dot, name (click to expand),
 /// small icon actions, and an inline editor underneath when expanded.
-final class ProjectRow: NSView, NSTextFieldDelegate {
+final class ProjectRow: SurfaceView, NSTextFieldDelegate {
     let projectID: String
     private let dot = DotView()
     private let status = label("")
@@ -56,7 +56,7 @@ final class ProjectRow: NSView, NSTextFieldDelegate {
         projectID = project.id
         super.init(frame: .zero)
         wantsLayer = true; layer?.cornerRadius = 7; layer?.borderWidth = 1
-        layer?.borderColor = NSColor.separatorColor.cgColor; layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+        surfaceBorderColor = .separatorColor; surfaceColor = .controlBackgroundColor
         let name = label(project.name, bold: true); name.lineBreakMode = .byTruncatingTail; name.maximumNumberOfLines = 1
         status.font = .systemFont(ofSize: 11); status.textColor = .secondaryLabelColor; status.maximumNumberOfLines = 3
         let titles = NSStackView(views: [name, status]); titles.orientation = .vertical; titles.alignment = .leading; titles.spacing = 1
@@ -105,7 +105,7 @@ final class ProjectRow: NSView, NSTextFieldDelegate {
     func setExpanded(_ expanded: Bool) {
         editor.isHidden = !expanded
         chevron.image = NSImage(systemSymbolName: expanded ? "chevron.up" : "chevron.down", accessibilityDescription: nil)
-        layer?.borderColor = (expanded ? NSColor.tertiaryLabelColor : NSColor.separatorColor).cgColor
+        surfaceBorderColor = expanded ? .tertiaryLabelColor : .separatorColor
     }
     func update(_ s: RuntimeManager.Status) {
         dot.show(s.state); status.stringValue = s.text; status.toolTip = s.text
