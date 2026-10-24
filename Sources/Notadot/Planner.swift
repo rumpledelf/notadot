@@ -106,9 +106,9 @@ final class Planner {
         case .authorized: done(.success(()))
         case .notDetermined:
             events.requestAccess(to: type) { allowed, error in
-                DispatchQueue.main.async { done(allowed ? .success(()) : .failure(error ?? AppError.message("Access was declined. Enable Notadot in System Preferences → Security & Privacy → Privacy."))) }
+                DispatchQueue.main.async { done(allowed ? .success(()) : .failure(error ?? AppError.message("Access was declined. Enable access for this app in System Preferences → Security & Privacy → Privacy."))) }
             }
-        default: done(.failure(AppError.message("Access is denied or restricted. Enable Notadot's Calendar or Reminders access in System Preferences → Security & Privacy → Privacy.")))
+        default: done(.failure(AppError.message("Access is denied or restricted. Enable Calendar or Reminders access for this app in System Preferences → Security & Privacy → Privacy.")))
         }
     }
     private func calendars(_ name: String?) throws -> [EKCalendar]? {

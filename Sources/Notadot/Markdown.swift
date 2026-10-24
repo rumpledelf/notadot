@@ -3,6 +3,15 @@ import AppKit
 /// Enough Markdown for notes and chat replies: headings, lists, fenced code, **bold**, `code` and links.
 /// AppKit's own Markdown support needs macOS 12, and this app targets 11.
 enum Markdown {
+    /// Chat replies use absolute paths as well as file: URLs. A bare path URL
+    /// has no scheme, so AppKit cannot dispatch it to a document application.
+    static func linkURL(_ target: String) -> URL? {
+        let raw = target.hasPrefix("<") && target.hasSuffix(">") ? String(target.dropFirst().dropLast()) : target
+        if raw.hasPrefix("/") {
+            return URL(fileURLWithPath: raw.removingPercentEncoding ?? raw)
+        }
+        return URL(string: raw)
+    }
     static func render(_ text: String, size: CGFloat = 14, color: NSColor = .labelColor) -> NSAttributedString {
         let out = NSMutableAttributedString()
         let body = NSFont.systemFont(ofSize: size)
@@ -44,7 +53,7 @@ enum Markdown {
     private static func inline(_ text: String, font: NSFont, mono: NSFont, color: NSColor) -> NSAttributedString {
         let out = NSMutableAttributedString()
         // `code`, **bold**, [label](url) — scanned left to right, unmatched markers stay literal.
-        let pattern = try! NSRegularExpression(pattern: "`([^`]+)`|\\*\\*([^*]+)\\*\\*|\\[([^\\]]+)\\]\\(([^)\\s]+)\\)")
+        let pattern = try! NSRegularExpression(pattern: "`([^`]+)`|\\*\\*([^*]+)\\*\\*|\\[([^\\]]+)\\]\\((<[^>\\n]+>|[^)\\s]+)\\)")
         let ns = text as NSString; var last = 0
         for m in pattern.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
             out.append(NSAttributedString(string: ns.substring(with: NSRange(location: last, length: m.range.location - last)), attributes: [.font: font, .foregroundColor: color]))
@@ -54,7 +63,7 @@ enum Markdown {
                 out.append(NSAttributedString(string: ns.substring(with: m.range(at: 2)), attributes: [.font: NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask), .foregroundColor: color]))
             } else {
                 var attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.linkColor]
-                if let url = URL(string: ns.substring(with: m.range(at: 4))) { attributes[.link] = url }
+                if let url = linkURL(ns.substring(with: m.range(at: 4))) { attributes[.link] = url }
                 out.append(NSAttributedString(string: ns.substring(with: m.range(at: 3)), attributes: attributes))
             }
             last = m.range.location + m.range.length

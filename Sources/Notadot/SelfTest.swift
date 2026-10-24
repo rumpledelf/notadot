@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 
 func selfTest() throws {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent("notadot-test-" + UUID().uuidString)
@@ -11,6 +11,22 @@ func selfTest() throws {
         let end = Date().addingTimeInterval(seconds)
         while Date() < end { RunLoop.current.run(until: Date().addingTimeInterval(0.02)); usleep(20000) }
     }
+    let localLinkCases = [
+        ("[Trufflepigs.md](/Users/robyn/Sites/photodir/docs/Trufflepigs.md)", "/Users/robyn/Sites/photodir/docs/Trufflepigs.md"),
+        ("[Admin authentication.md](/Users/robyn/Sites/photodir/docs/Admin%20authentication.md)", "/Users/robyn/Sites/photodir/docs/Admin authentication.md"),
+        ("[Notes](</tmp/Notes and plans (draft).md>)", "/tmp/Notes and plans (draft).md"),
+        ("[Notes](file:///tmp/Notes%20and%20plans.md)", "/tmp/Notes and plans.md"),
+        ("[Percent](/tmp/100%2520literal.md)", "/tmp/100%20literal.md")
+    ]
+    for (markdown, path) in localLinkCases {
+        let rendered = Markdown.render(markdown)
+        let url = rendered.attribute(.link, at: 0, effectiveRange: nil) as? URL
+        try check(url?.isFileURL == true && url?.path == path, "Markdown local link opens as a file URL: \(path)")
+    }
+    let webLink = Markdown.render("[Website](https://example.com/path?q=notes#section)")
+    try check((webLink.attribute(.link, at: 0, effectiveRange: nil) as? URL)?.absoluteString == "https://example.com/path?q=notes#section", "Web links retain their URL and browser behavior")
+    let codeLink = Markdown.render("`[Notes](/tmp/notes.md)`")
+    try check(codeLink.attribute(.link, at: 0, effectiveRange: nil) == nil, "Inline code is not turned into a clickable file link")
     let store = try Store(directory: directory)
     store.settings.title = "Housekeeping"
     store.session.threadID = "test-thread"; store.session.messages = [Message(role: "you", text: "Keep this across a reboot")]
@@ -18,6 +34,20 @@ func selfTest() throws {
     let restored = try Store(directory: directory)
     try check(restored.settings.title == "Housekeeping" && restored.session.threadID == "test-thread" && restored.session.messages.count == 1, "Settings and session survive a fresh Store")
     var replies: [Message] = []
+    var toolRows: [Message] = []
+    var nativeItem: [String: Any] = ["id": "native-result", "type": "dynamicToolCall", "tool": "notadot", "arguments": ["action": "reminders_list"]]
+    Transcript.tool(nativeItem, completed: false, messages: &toolRows)
+    try check(toolRows.first?.text == "notadot", "Native tools start as a compact row")
+    nativeItem["contentItems"] = [["type": "inputText", "text": "Buy milk tomorrow"]]
+    nativeItem["success"] = true
+    Transcript.tool(nativeItem, completed: true, messages: &toolRows)
+    Transcript.tool(nativeItem, completed: true, messages: &toolRows)
+    let savedToolRows = try JSONDecoder().decode([Message].self, from: JSONEncoder().encode(toolRows))
+    try check(savedToolRows.count == 1 && savedToolRows[0].text == "notadot" && savedToolRows[0].toolDetails?.contains("Buy milk tomorrow") == true && savedToolRows[0].toolDetails?.contains("reminders_list") == true, "Completed tool arguments and results persist separately from the compact label")
+    let oldTool = try JSONDecoder().decode(Message.self, from: Data("{\"role\":\"tool\",\"text\":\"notadot\"}".utf8))
+    try check(oldTool.toolDetails == nil, "Older transcripts load without tool details")
+    Transcript.tool(["id": "shell-result", "type": "commandExecution", "command": "printf hello", "aggregatedOutput": "hello", "exitCode": 0], completed: true, messages: &toolRows)
+    try check(toolRows.last?.toolDetails?.contains("hello") == true && toolRows.last?.toolDetails?.contains("Exit code") == true, "Shell results are available in the same tool disclosure")
     Transcript.item(["id": "progress", "phase": "commentary", "text": ""], turn: "turn-1", messages: &replies)
     Transcript.delta(["itemId": "progress", "delta": "Got it."], turn: "turn-1", messages: &replies)
     try check(Transcript.visible(replies).first?.phase == "commentary", "Progress is identified while a turn is working")
@@ -26,16 +56,16 @@ func selfTest() throws {
     Transcript.delta(["itemId": "final", "delta": "Understood."], turn: "turn-1", messages: &replies)
     Transcript.item(["id": "final", "phase": "final_answer", "text": "Understood."], turn: "turn-1", messages: &replies)
     Transcript.item(["id": "final", "phase": "final_answer", "text": "Understood."], turn: "turn-1", messages: &replies)
-    try check(Transcript.visible(replies).filter { $0.role == "assistant" }.map(\.text) == ["Understood."] && replies.filter { $0.itemID == "final" }.count == 1, "Commentary/tool/final replay displays one finished reply without duplicating completed items")
+    try check(Transcript.visible(replies).filter { $0.role == "assistant" && $0.phase != "commentary" }.map(\.text) == ["Understood."] && replies.filter { $0.itemID == "final" }.count == 1, "Commentary stays separate from the single final answer")
     let persistedReplies = try JSONDecoder().decode([Message].self, from: JSONEncoder().encode(replies))
-    try check(Transcript.visible(persistedReplies).filter { $0.role == "assistant" }.count == 1 && persistedReplies.count == 3, "Phase and turn metadata survive reload without deleting the underlying history")
+    try check(Transcript.visible(persistedReplies).contains { $0.phase == "commentary" && $0.text == "Got it." } && persistedReplies.count == 3, "Commentary survives completion and reload for click-to-expand activity")
     replies.append(Message(role: "assistant", text: "A stable partial result", phase: "partial_answer", turnID: "turn-1"))
     replies.append(Message(role: "assistant", text: "Still working on the next turn", phase: "commentary", turnID: "turn-2"))
     try check(Transcript.visible(replies).contains { $0.phase == "partial_answer" } && Transcript.visible(replies).contains { $0.turnID == "turn-2" }, "Stable partial answers and progress from another turn are preserved")
     var oldReplies = [Message(role: "assistant", text: "Old progress", itemID: "old-progress"), Message(role: "assistant", text: "Old final", itemID: "old-final")]
     Transcript.item(["id": "old-progress", "phase": "commentary", "text": "Old progress"], turn: "old-turn", messages: &oldReplies)
     Transcript.item(["id": "old-final", "phase": "final_answer", "text": "Old final"], turn: "old-turn", messages: &oldReplies)
-    try check(Transcript.visible(oldReplies).map(\.text) == ["Old final"], "Resumed Codex items repair phase metadata in older saved conversations")
+    try check(Transcript.visible(oldReplies).map(\.text) == ["Old progress", "Old final"] && oldReplies[0].phase == "commentary", "Resumed Codex items recover older commentary for activity disclosures")
     try check(Store.codexPath("/usr/bin/true") == "/usr/bin/true" && Store.codexPath(directory.path + "/missing") == nil, "A configured Codex path is used as given, and a missing one is reported")
     restored.settings.codex = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/codex").path; try restored.saveSettings()
     let migrated = try Store(directory: directory)
@@ -48,6 +78,15 @@ func selfTest() throws {
     let projectFolder = directory.appendingPathComponent("job-project"); let child = projectFolder.appendingPathComponent("Sources")
     try FileManager.default.createDirectory(at: child, withIntermediateDirectories: true)
     let jobProject = Project(name: "Jobs", path: projectFolder.path, port: 0, start: "")
+    let externalProject = Project(name: "My website", path: projectFolder.path, port: 8123, start: "", url: "http://localhost:8123/site/")
+    let external = OtherServer(pid: 1, command: "node", port: 8123, folder: child.path)
+    try check(external.title(projects: [externalProject]) == "My website" && external.pageURL(projects: [externalProject]).absoluteString == "http://localhost:8123/site/", "External servers match their project from a subfolder and use its configured page")
+    let differentPort = OtherServer(pid: 1, command: "node", port: 8124, folder: child.path)
+    try check(differentPort.pageURL(projects: [externalProject]).absoluteString == "http://localhost:8124/", "An external server on a different port opens its actual detected port")
+    let unrelated = OtherServer(pid: 1, command: "node", port: 8123, folder: projectFolder.path + "-other")
+    try check(unrelated.project(in: [externalProject]) == nil && unrelated.title(projects: [externalProject]) == "job-project-other", "External project matching respects folder boundaries and falls back to the folder name")
+    let nestedProject = Project(name: "Nested website", path: child.path, port: 8123, start: "")
+    try check(external.title(projects: [externalProject, nestedProject]) == "Nested website", "The closest configured project wins for nested working folders")
     try check(try Jobs.folder(child.path, projects: [jobProject]) == child.path, "Jobs accept subfolders of configured projects")
     let sibling = directory.appendingPathComponent("job-project-other"); try FileManager.default.createDirectory(at: sibling, withIntermediateDirectories: true)
     do { _ = try Jobs.folder(sibling.path, projects: [jobProject]); throw AppError.message("FAIL: sibling accepted") }

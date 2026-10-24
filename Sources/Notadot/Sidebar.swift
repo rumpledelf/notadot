@@ -36,6 +36,27 @@ final class ClickArea: NSStackView {
     override func accessibilityPerformPress() -> Bool { onClick?(); return true }
 }
 
+/// A discovered listener remains externally owned; only offer its page, never a stop button.
+final class OtherServerRow: NSView {
+    var onOpen: (() -> Void)?
+    init(server: OtherServer, projects: [Project]) {
+        super.init(frame: .zero)
+        let name = label(server.title(projects: projects), bold: true)
+        name.lineBreakMode = .byTruncatingTail; name.maximumNumberOfLines = 1
+        let detail = label(":\(server.port) · \(server.command)")
+        detail.font = .systemFont(ofSize: 11); detail.textColor = .secondaryLabelColor
+        let titles = NSStackView(views: [name, detail]); titles.orientation = .vertical; titles.alignment = .leading; titles.spacing = 1
+        titles.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let spacer = NSView(); spacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        let open = iconButton("arrow.up.right", "Open in browser", self, #selector(openTapped))
+        let row = NSStackView(views: [titles, spacer, open]); row.orientation = .horizontal; row.spacing = 6; row.alignment = .centerY
+        toolTip = "\(server.folder)\n\(server.pageURL(projects: projects).absoluteString)"
+        pin(row, in: self, inset: 0)
+    }
+    required init?(coder: NSCoder) { nil }
+    @objc private func openTapped() { onOpen?() }
+}
+
 /// One project in the sidebar, laid out like fern-layout's section rows: status dot, name (click to expand),
 /// small icon actions, and an inline editor underneath when expanded.
 final class ProjectRow: SurfaceView, NSTextFieldDelegate {

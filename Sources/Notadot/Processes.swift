@@ -24,7 +24,25 @@ final class URLProbe {
 
 /// Dev servers listening on this Mac that Notadot didn't start. Notadot never stops these itself;
 /// the list is handed to the chat so the assistant can sort them out with the user.
-struct OtherServer { let pid: Int32; let command: String; let port: Int; let folder: String }
+struct OtherServer {
+    let pid: Int32; let command: String; let port: Int; let folder: String
+    func project(in projects: [Project]) -> Project? {
+        guard folder != "?" else { return nil }
+        let path = URL(fileURLWithPath: (folder as NSString).expandingTildeInPath).resolvingSymlinksInPath().path
+        return projects.filter { project in
+            let root = URL(fileURLWithPath: project.path).resolvingSymlinksInPath().path
+            return path == root || path.hasPrefix(root == "/" ? root : root + "/")
+        }.max { $0.path.count < $1.path.count }
+    }
+    func title(projects: [Project]) -> String {
+        if let project = project(in: projects) { return project.name }
+        return folder == "?" ? command : URL(fileURLWithPath: folder).lastPathComponent
+    }
+    func pageURL(projects: [Project]) -> URL {
+        if let project = project(in: projects), project.port == port, let url = project.openURL { return url }
+        return URL(string: "http://localhost:\(port)/")!
+    }
+}
 enum OtherServers {
     static let devCommands: Set<String> = ["node", "php", "python", "python3", "Python", "ruby", "java", "deno", "bun", "go", "hugo", "beam.smp", "uvicorn", "gunicorn", "rails", "puma"]
     static func scan(excludingGroups owned: Set<Int32>) -> [OtherServer] {

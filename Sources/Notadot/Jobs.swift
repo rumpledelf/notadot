@@ -112,7 +112,10 @@ final class Jobs {
                 self.liveThreads[id] = threadID; self.store.jobs[i].turnID = nil
                 var active = false
                 for turn in thread["turns"] as? [[String: Any]] ?? [] {
-                    for item in turn["items"] as? [[String: Any]] ?? [] where item["type"] as? String == "agentMessage" { Transcript.item(item, turn: turn["id"] as? String, messages: &self.store.jobs[i].messages) }
+                    for item in turn["items"] as? [[String: Any]] ?? [] {
+                        if item["type"] as? String == "agentMessage" { Transcript.item(item, turn: turn["id"] as? String, messages: &self.store.jobs[i].messages) }
+                        else { Transcript.tool(item, completed: item["status"] as? String != "inProgress", messages: &self.store.jobs[i].messages) }
+                    }
                     if turn["status"] as? String == "inProgress" { active = true; self.store.jobs[i].turnID = turn["id"] as? String }
                 }
                 if !active && self.store.jobs[i].state == .working { self.store.jobs[i].state = .waiting }
@@ -148,13 +151,10 @@ final class Jobs {
         case "item/agentMessage/delta":
             Transcript.delta(params, turn: params["turnId"] as? String ?? store.jobs[i].turnID, messages: &store.jobs[i].messages)
             changed?(); return true // Checkpoint deltas on the app timer, not for every token.
-        case "item/completed":
-            if let item = params["item"] as? [String: Any], item["type"] as? String == "agentMessage" { Transcript.item(item, turn: params["turnId"] as? String ?? store.jobs[i].turnID, messages: &store.jobs[i].messages) }
-        case "item/started":
-            if let item = params["item"] as? [String: Any], item["type"] as? String == "agentMessage" { Transcript.item(item, turn: params["turnId"] as? String ?? store.jobs[i].turnID, messages: &store.jobs[i].messages) }
-            if let item = params["item"] as? [String: Any], let kind = item["type"] as? String,
-               ["commandExecution", "fileChange", "mcpToolCall", "webSearch"].contains(kind) {
-                store.jobs[i].messages.append(Message(role: "tool", text: String((item["command"] as? String ?? kind).prefix(1500)), itemID: item["id"] as? String))
+        case "item/started", "item/completed":
+            if let item = params["item"] as? [String: Any] {
+                if item["type"] as? String == "agentMessage" { Transcript.item(item, turn: params["turnId"] as? String ?? store.jobs[i].turnID, messages: &store.jobs[i].messages) }
+                else { Transcript.tool(item, completed: method == "item/completed", messages: &store.jobs[i].messages) }
             }
         case "turn/completed":
             let turn = params["turn"] as? [String: Any] ?? [:]

@@ -36,7 +36,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
         name = field(s.title)
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 375), styleMask: [.titled, .closable], backing: .buffered, defer: false)
         super.init()
-        window.title = "Settings"; window.isReleasedWhenClosed = false; window.delegate = self
+        window.title = "\(s.title) Settings"; window.isReleasedWhenClosed = false; window.delegate = self
 
         // Notes editor: installed editors by name, plus whatever was chosen before.
         editor.addItem(withTitle: "Default app for Markdown"); editor.lastItem?.representedObject = ""

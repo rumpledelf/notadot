@@ -61,6 +61,7 @@ struct Message: Codable {
     var itemID: String?
     var phase: String?
     var turnID: String?
+    var toolDetails: String?
 }
 struct Session: Codable {
     var threadID: String?
@@ -90,7 +91,7 @@ final class Store {
         if settings.codex == FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/codex").path { settings.codex = "" }
         if settings.notes.isEmpty { settings.notes = self.directory.appendingPathComponent("notes.md").path }
         if !FileManager.default.fileExists(atPath: settings.notes) {
-            try "# Notadot notes\n\nPersistent preferences, decisions, and loose ends live here.\n".write(toFile: settings.notes, atomically: true, encoding: .utf8)
+            try "# \(settings.title) notes\n\nPersistent preferences, decisions, and loose ends live here.\n".write(toFile: settings.notes, atomically: true, encoding: .utf8)
         }
         try saveSettings()
     }

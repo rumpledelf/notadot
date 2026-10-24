@@ -19,6 +19,7 @@ The build script uses the installed Command Line Tools compiler and SDK, targets
 - Progress messages are marked **Working** while a turn runs, then collapse when its final answer arrives. Stable partial answers remain visible. The original items and their phases remain saved; reconnecting fills in phase metadata for older conversations. This applies to housekeeper and job chats.
 - Simple acknowledgements and temporary status updates require one final reply with no progress or tools. Loaded notes are reference material, not a request to rewrite memory on every message. Durable notes still work for remembered preferences, project decisions, and actual work.
 - **Notes:** `notes.md` works like AGENTS.md. Notadot includes it with your first message after every connect or compaction, and the assistant adds to it. **Notes** in the sidebar shows it formatted (read-only); the pencil opens it in your notes editor.
+- Local file links in chat and Notes open as documents. Markdown files use your selected notes editor (or the macOS default when none is selected); other files use their default application. Absolute paths, `file:` URLs, percent-encoded spaces, and angle-bracket Markdown destinations with spaces are supported. Missing files and launch failures are reported in the chat.
 - **Settings** (`⌘,`, or the cog bottom left): name, notes editor, model (listed by the connected Codex), Codex (automatic or a chosen executable), and New Session, which archives the conversation and starts fresh. Notes carry over.
 - **Permissions:** the first time the assistant wants the screen or clipboard, Notadot asks: Allow Once, Don't Allow, or Always Allow. Codex command and file approvals always ask.
 
@@ -34,7 +35,7 @@ Closing the main window keeps the app, active turn, and project runtimes alive. 
 
 Status dots: **green**, Notadot started it and it's running; **red**, Notadot's project, stopped; **blue**, something answers that Notadot didn't start; **grey**, nothing answering. Link-only projects are checked by loading their address.
 
-Notadot supervises what it starts: it reports running only when the process group listens on the configured port, stops it if it opens a different port, and gives up if the port doesn't open within 30 seconds. It never stops a process it didn't start. When dev servers it didn't start are running, the sidebar offers **Ask Notadot to sort these out**, which hands the list to the chat; the assistant asks before stopping anything.
+Notadot supervises what it starts: it reports running only when the process group listens on the configured port, stops it if it opens a different port, and gives up if the port doesn't open within 30 seconds. It never stops a process it didn't start. Other dev servers appear in the sidebar with their matching project name (or working folder name), process, and port. Each has an arrow to open its page: the saved project address when its port matches, otherwise localhost on the detected port. **Ask [your assistant's name]** hands the list to the chat; the assistant asks before stopping anything. In-app labels, menus, and dialogs use the name configured in Settings.
 
 ## Jobs
 

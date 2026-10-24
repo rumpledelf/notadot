@@ -73,7 +73,7 @@ final class NativeTools {
     func screenshot() throws -> String {
         guard CGPreflightScreenCaptureAccess() else {
             CGRequestScreenCaptureAccess()
-            throw AppError.message("Allow Notadot in System Preferences → Security & Privacy → Privacy → Screen Recording, then quit and reopen the app.")
+            throw AppError.message("Allow \(store.settings.title) in System Preferences → Security & Privacy → Privacy → Screen Recording, then quit and reopen the app.")
         }
         guard let image = CGDisplayCreateImage(CGMainDisplayID()), let data = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else { throw AppError.message("Screen capture failed.") }
         return "data:image/png;base64," + data.base64EncodedString()

@@ -14,7 +14,7 @@ final class Codex {
     private var methods: [Int: String] = [:]
     var running: Bool { process?.isRunning == true }
 
-    func start(path: String, cwd: String, ready: @escaping (Result<[String: Any], Error>) -> Void) throws {
+    func start(path: String, cwd: String, title: String, ready: @escaping (Result<[String: Any], Error>) -> Void) throws {
         guard !running else { throw AppError.message("Codex is already connected.") }
         let p = Process(), stdin = Pipe(), stdout = Pipe(), stderr = Pipe()
         p.executableURL = URL(fileURLWithPath: path)
@@ -37,7 +37,7 @@ final class Codex {
         } }
         process = p
         do { try p.run() } catch { closed(error.localizedDescription); throw error }
-        call("initialize", ["clientInfo": ["name": "notadot", "title": "Notadot", "version": "0.1.0"], "capabilities": ["experimentalApi": true]]) { [weak self] result in
+        call("initialize", ["clientInfo": ["name": "notadot", "title": title, "version": "0.1.0"], "capabilities": ["experimentalApi": true]]) { [weak self] result in
             if case .success = result { self?.send(["method": "initialized", "params": [:]]) }
             ready(result)
         }
