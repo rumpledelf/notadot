@@ -478,7 +478,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTextViewDe
         }
         append("you", text + (attachment == nil ? "" : "\n[Screen attached]")); composer.string = ""; attachment = nil
         busy = true; status.stringValue = sendsNotes ? "Working… · notes loaded" : "Working…"; updateControls()
-        codex.call("turn/start", ["threadId": thread, "input": input]) { [weak self] result in
+        codex.call("turn/start", ["threadId": thread, "input": input, "effort": "medium"]) { [weak self] result in
             switch result {
             case .success(let response): if sendsNotes { self?.notesDue = false }; self?.store.session.pendingJobNotes?.removeAll(where: { jobNotes.contains($0) }); self?.turnID = (response["turn"] as? [String: Any])?["id"] as? String; self?.store.session.threadID = thread; self?.persist(); self?.updateControls()
             case .failure(let error): self?.busy = false; self?.composer.string = text; self?.showError(error); self?.updateControls()

@@ -72,7 +72,7 @@ with tempfile.TemporaryDirectory(prefix="notadot-behavior-") as directory:
             inputs = [{"type": "text", "text": text}]
             if index == 0:
                 inputs.insert(0, {"type": "text", "text": contract["notes"]})
-            call("turn/start", {"threadId": thread, "input": inputs})
+            call("turn/start", {"threadId": thread, "input": inputs, "effort": "medium"})
             replies = []
             attempts = []
             deadline = time.monotonic() + 90

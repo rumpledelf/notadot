@@ -71,7 +71,7 @@ stream_max_retries = 0
         thread = response["thread"]["id"]
         print("PASS: initialize and thread/start with native tool")
         # Same shape Notadot sends after a reconnect or compaction: a notes block, then the message.
-        turn = client.call("turn/start", {"threadId": thread, "input": [
+        turn = client.call("turn/start", {"threadId": thread, "effort": "medium", "input": [
             {"type": "text", "text": "<notadot_notes>\n# Notes\n</notadot_notes>"},
             {"type": "text", "text": "Offline fixture"}]})
         time.sleep(0.5)
@@ -83,7 +83,7 @@ stream_max_retries = 0
         job_thread = client.call("thread/start", {"cwd": str(home), "model": job_model,
                                  "dynamicTools": [], "config": {"features.multi_agent": False,
                                                                  "apps._default.enabled": False}})["thread"]["id"]
-        job_turn = client.call("turn/start", {"threadId": job_thread,
+        job_turn = client.call("turn/start", {"threadId": job_thread, "effort": "medium",
                               "input": [{"type": "text", "text": "Offline job fixture"}]})
         time.sleep(0.5)
         client.call("turn/interrupt", {"threadId": job_thread, "turnId": job_turn["turn"]["id"]})
@@ -114,5 +114,13 @@ stream_max_retries = 0
         job_meta = next(m for m in metadata if m["id"] == job_thread)
         assert not job_meta.get("dynamic_tools"), "Job inherited native tools"
         print("PASS: job resumes after restart without housekeeper tools")
+        for thread_id in [thread, job_thread]:
+            items = next(items for record in records
+                         for items in [[json.loads(line) for line in record.read_text().splitlines()]]
+                         if any(item.get("type") == "session_meta" and item["payload"]["id"] == thread_id
+                                for item in items))
+            contexts = [item["payload"] for item in items if item.get("type") == "turn_context"]
+            assert contexts and all(context.get("effort") == "medium" for context in contexts), contexts
+        print("PASS: housekeeper and job turns persist medium reasoning effort")
     finally:
         client.close()

@@ -16,6 +16,7 @@ The build script uses the installed Command Line Tools compiler and SDK, targets
 ## Using it
 
 - **Chat:** one long-running Codex session. Return sends and Shift-Return adds a line; while it's working, sending steers the current turn and `⌘.` stops it. Compact asks Codex to compact its context. Screen and clipboard sharing are in the composer's **+** menu.
+- Chat and jobs explicitly use **medium** reasoning effort on each new turn, including in resumed conversations.
 - Progress messages are marked **Working** while a turn runs, then collapse when its final answer arrives. Stable partial answers remain visible. The original items and their phases remain saved; reconnecting fills in phase metadata for older conversations. This applies to housekeeper and job chats.
 - Simple acknowledgements and temporary status updates require one final reply with no progress or tools. Loaded notes are reference material, not a request to rewrite memory on every message. Durable notes still work for remembered preferences, project decisions, and actual work.
 - **Notes:** `notes.md` works like AGENTS.md. Notadot includes it with your first message after every connect or compaction, and the assistant adds to it. **Notes** in the sidebar shows it formatted (read-only); the pencil opens it in your notes editor.

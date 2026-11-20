@@ -132,6 +132,7 @@ final class Jobs {
             if let attachment = attachment { input.append(["type": "image", "url": attachment]) }
             var params: [String: Any] = ["threadId": thread, "input": input]
             let steer = self.store.jobs[i].turnID != nil
+            if !steer { params["effort"] = "medium" }
             if let turn = self.store.jobs[i].turnID { params["expectedTurnId"] = turn }
             self.store.jobs[i].messages.append(Message(role: "you", text: text)); self.store.jobs[i].state = .working; self.save()
             self.codex.call(steer ? "turn/steer" : "turn/start", params) { result in
