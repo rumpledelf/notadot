@@ -15,6 +15,12 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTextViewDe
     var window: NSWindow!
     let transcript = NSTextView(), composer = NSTextView()
     let status = label(""), titleLabel = label("", bold: true)
+    private let allowanceRows = AllowanceRows()
+    private var lastAllowanceCheck: String?
+    private let allowance = label("Allowance unchecked")
+    private var allowanceTimer: Timer?
+    private var readingAllowance = false
+    private var allowanceHistory = [String]()
     let connDot = DotView(), connLabel = label("Disconnected"), versionLabel = label("")
     let projectList = NSStackView(), projectCount = label("")
     var projectRows: [String: ProjectRow] = [:], expandedID: String?
@@ -57,12 +63,18 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTextViewDe
             self.ready = false; self.busy = false; self.status.stringValue = message; self.updateControls()
             self.jobs.disconnected()
         }
-        timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in self?.refreshProjects(); if self?.jobs.hasWorking == true { self?.jobs.save() } }
+        timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in self?.allowanceRows.tick(); self?.refreshProjects(); if self?.jobs.hasWorking == true { self?.jobs.save() } }
         if smoke { DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.uiSmoke() } }
         else { connect() }
     }
     /// Each step waits a moment so the window server has drawn the change before it's captured.
     private func uiSmoke() {
+        let now = Date().timeIntervalSince1970
+        _ = allowanceRows.update([
+            "primary": ["usedPercent": 7, "windowDurationMins": 300, "resetsAt": now + 16140] as [String: Any],
+            "secondary": ["usedPercent": 6, "windowDurationMins": 10080, "resetsAt": now + 504000] as [String: Any]
+        ])
+        allowance.stringValue = "Checked just now"
         store.settings.title = "Bottled Fey"
         let demo = Project(name: "Garden project", path: store.directory.appendingPathComponent("garden").path, port: 8117, start: "", url: "http://localhost:8117/garden/")
         store.settings.projects = [demo]
@@ -219,11 +231,26 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTextViewDe
         bottom.orientation = .horizontal; bottom.spacing = 8; bottom.edgeInsets = NSEdgeInsets(top: 8, left: 8, bottom: 0, right: 0)
         let line = NSBox(); line.boxType = .separator
 
-        let column = NSStackView(views: [notesRow, headRow, add, projectScroll, othersBox, line, bottom])
+        allowance.maximumNumberOfLines = 0
+        allowance.font = .systemFont(ofSize: 11)
+        let usageRow = NSStackView(views: [allowance, iconButton("arrow.clockwise", "Refresh allowance", self, #selector(refreshAllowance))])
+        let usageCard = SurfaceStackView(views: [allowanceRows, usageRow])
+        usageCard.orientation = .vertical
+        usageCard.alignment = .leading
+        usageCard.spacing = 6
+        usageCard.edgeInsets = NSEdgeInsets(top: 10, left: 10, bottom: 6, right: 10)
+        usageCard.wantsLayer = true
+        usageCard.layer?.cornerRadius = 10
+        usageCard.surfaceColor = .controlBackgroundColor
+        allowanceRows.isHidden = true
+        for row in [allowanceRows, usageRow] {
+            row.widthAnchor.constraint(equalTo: usageCard.widthAnchor, constant: -20).isActive = true
+        }
+        let column = NSStackView(views: [notesRow, headRow, add, projectScroll, othersBox, line, usageCard, bottom])
         column.orientation = .vertical; column.alignment = .leading; column.spacing = 8
         column.edgeInsets = NSEdgeInsets(top: 12, left: 10, bottom: 12, right: 10)
         column.setCustomSpacing(16, after: notesRow)
-        for v in [notesRow, headRow, add, projectScroll, othersBox, line, bottom] { v.widthAnchor.constraint(equalTo: column.widthAnchor, constant: -20).isActive = true }
+        for v in [notesRow, headRow, add, projectScroll, othersBox, line, usageCard, bottom] { v.widthAnchor.constraint(equalTo: column.widthAnchor, constant: -20).isActive = true }
         projectScroll.setContentHuggingPriority(.init(1), for: .vertical)
         pin(column, in: background, inset: 0)
         return background
@@ -412,12 +439,45 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTextViewDe
                 guard let self = self else { return }
                 switch result {
                 case .failure(let error): self.showError(error)
-                case .success: self.openThread()
+                case .success:
+                    self.refreshAllowance()
+                    self.allowanceTimer?.invalidate()
+                    self.allowanceTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
+                        if self?.codex.running == true { self?.refreshAllowance() }
+                    }
+                    self.openThread()
                 }
             }
             updateControls()
         } catch { showError(error); updateControls() }
     }
+    @objc private func refreshAllowance() {
+        guard !readingAllowance else { return }
+        readingAllowance = true
+        codex.call("account/rateLimits/read", [:]) { [weak self] result in
+            guard let self = self else { return }
+            self.readingAllowance = false
+            guard case .success(let payload) = result,
+                  let snapshot = payload["rateLimits"] as? [String: Any] else {
+                self.allowance.stringValue = (self.lastAllowanceCheck ?? "Allowance unchecked") + "\nRefresh failed"
+                return
+            }
+            let lines = self.allowanceRows.update(snapshot)
+            let time = DateFormatter.localizedString(from: Date(), dateStyle: .short, timeStyle: .short)
+            let reading = (lines.isEmpty ? "Allowance unavailable" : lines.joined(separator: " · ")) + "\n" + time
+            self.allowanceHistory.append(reading)
+            self.allowanceHistory = Array(self.allowanceHistory.suffix(48))
+            self.lastAllowanceCheck = "Checked " + time
+            self.allowance.stringValue = lines.isEmpty ? "Allowance unavailable" : "Checked " + time
+            var details = ["primary", "secondary"].compactMap { key -> String? in
+                guard let window = snapshot[key] as? [String: Any], let reset = window["resetsAt"] as? Double else { return nil }
+                return key.capitalized + " resets " + DateFormatter.localizedString(from: Date(timeIntervalSince1970: reset), dateStyle: .short, timeStyle: .short)
+            }
+            details += self.allowanceHistory.reversed()
+            self.allowance.toolTip = details.joined(separator: "\n")
+        }
+    }
+
     private func openThread() {
         // Codex may write inside your projects and Notadot's own folder; nowhere else without asking.
         var params: [String: Any] = ["cwd": FileManager.default.homeDirectoryForCurrentUser.path, "runtimeWorkspaceRoots": workspaceRoots, "developerInstructions": instructions()]
